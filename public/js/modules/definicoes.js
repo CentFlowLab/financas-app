@@ -2,6 +2,7 @@ import { S, save, exportData, importData, parseBackup, resetAll, SCHEMA_VERSION 
 import { esc, today, num } from '../util.js';
 import { download, toast, confirmBox, fld, inp, sel } from '../ui.js';
 import { loadDemo } from '../demo.js';
+import { ICONS } from '../icons.js';
 
 export default {
   id: 'definicoes', titulo: 'Definições', icone: 'definicoes', descricao: 'Tema, cópia de segurança',
@@ -10,6 +11,10 @@ export default {
     const counts = `${S.movements.length} movimentos · ${S.accounts.length} contas · ${S.debts.length} dívidas · ${S.receipts.length} talões · ${S.warranties.length} garantias`;
     return `<div class="page-head"><h1 class="page-title">Definições</h1></div>
     <section class="card"><h2>Aspeto</h2><div class="seg" role="radiogroup" aria-label="Tema">${[['auto', 'Automático'], ['light', 'Claro'], ['dark', 'Escuro']].map(([v, l]) => `<label class="seg-opt"><input type="radio" name="tema" value="${v}" ${t === v ? 'checked' : ''}><span>${l}</span></label>`).join('')}</div></section>
+    <section class="card" id="card-importar"><h2>Importar extratos</h2>
+      <p class="muted">Traga os movimentos dos extratos do seu banco (CSV, Excel, OFX, QIF ou PDF). Tudo é processado localmente no dispositivo.</p>
+      <div class="btn-row"><a class="btn primary" id="btn-importar" href="#/importar?novo=1">${ICONS.importar} Importar extrato</a></div>
+      <small class="muted">${S.imports.length} importaç${S.imports.length === 1 ? 'ão' : 'ões'} feita${S.imports.length === 1 ? '' : 's'} · ${S.catRules.length} categoria${S.catRules.length === 1 ? '' : 's'} aprendida${S.catRules.length === 1 ? '' : 's'}</small></section>
     <section class="card"><h2>Cópia de segurança</h2>
       <p class="muted">Os seus dados ficam apenas neste dispositivo. Exporte regularmente uma cópia (inclui fotos de talões e garantias) e importe-a para mudar de telemóvel ou computador.</p>
       <div class="btn-row"><button class="btn primary" id="exp">⬇️ Exportar (JSON)</button><label class="btn ghost">⬆️ Importar cópia<input type="file" id="imp" accept="application/json,.json" hidden></label></div>
@@ -21,7 +26,7 @@ export default {
       <button class="btn ghost small" id="ia-save">Guardar</button></section>
     <section class="card"><h2>Instalar a aplicação</h2><p class="muted">Instale no ecrã principal para usar como uma app, mesmo sem internet.</p>${window.__installEvt ? '<button class="btn primary" id="inst">📲 Instalar</button>' : '<small class="muted">No telemóvel: menu do navegador → "Adicionar ao ecrã principal". No computador: ícone de instalação na barra de endereço.</small>'}</section>
     <section class="card"><h2>Dados</h2><div class="btn-row"><button class="btn ghost" id="demo">🧪 Carregar dados de exemplo</button><button class="btn danger" id="reset">🗑️ Apagar tudo</button></div></section>
-    <p class="muted center small">Finanças · versão 1.0 · esquema de dados v${SCHEMA_VERSION}</p>`;
+    <p class="muted center small">Finanças · versão 1.1 · esquema de dados v${SCHEMA_VERSION}</p>`;
   },
   mount(el) {
     el.querySelectorAll('[name=tema]').forEach((r) => r.addEventListener('change', () => { S.settings.tema = r.value; save('settings'); }));

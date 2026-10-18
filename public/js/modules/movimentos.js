@@ -148,7 +148,7 @@ export default {
     }
     const f = ui.mov;
     const n = activeFilterCount();
-    return `<div class="page-head"><h1 class="page-title">Movimentos</h1><button class="btn primary small" data-new>${ICONS.plus} Novo</button></div>
+    return `<div class="page-head"><h1 class="page-title">Movimentos</h1><div class="btn-row"><a class="btn ghost small" id="btn-importar" href="#/importar?novo=1">${ICONS.importar} Importar extrato</a><button class="btn primary small" data-new>${ICONS.plus} Novo</button></div></div>
     <div class="searchbar"><input type="search" name="q" value="${esc(f.q)}" placeholder="Pesquisar nota…" aria-label="Pesquisar"><button type="button" class="btn filter-btn" data-filters aria-haspopup="dialog" aria-label="Filtros${n ? `, ${n} ativo${n === 1 ? '' : 's'}` : ''}">${ICONS.filtros}<span>Filtros</span>${n ? `<b class="fcount" id="fcount">${n}</b>` : ''}</button></div>
     <p class="filter-sum small muted"><span id="mov-month">${esc(filterSummary())}</span>${n ? ' <button type="button" class="link btn-link" data-clear>Limpar filtros</button>' : ''}</p>
     <div id="mov-list">${listHtml()}</div>`;

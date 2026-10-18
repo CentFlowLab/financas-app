@@ -15,10 +15,11 @@ import precos from './modules/precos.js';
 import assistente from './modules/assistente.js';
 import categorias from './modules/categorias.js';
 import definicoes from './modules/definicoes.js';
+import importar from './modules/importar.js';
 
 // Registo de módulos — para acrescentar um módulo novo basta criar o ficheiro e juntá-lo aqui.
 const MAIN = [painel, movimentos, contas, dividas];
-const MORE = [taloes, combustivel, garantias, precos, assistente, categorias, definicoes];
+const MORE = [importar, taloes, combustivel, garantias, precos, assistente, categorias, definicoes];
 const ALL = [...MAIN, ...MORE];
 
 const mais = {
@@ -70,7 +71,7 @@ async function render() {
 // No Painel o botão flutuante é a "Despesa rápida" (destacado); nas outras vistas abre o formulário completo.
 function setFab(id) {
   const fab = $('#fab'), quick = id === 'painel';
-  fab.hidden = id === 'assistente' || id === 'definicoes';
+  fab.hidden = id === 'assistente' || id === 'definicoes' || id === 'importar';
   if (fab.dataset.mode === (quick ? 'quick' : 'full')) return;
   fab.dataset.mode = quick ? 'quick' : 'full';
   fab.classList.toggle('extended', quick);

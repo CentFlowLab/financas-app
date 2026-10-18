@@ -75,6 +75,7 @@ export default {
       <button type="button" class="qtile" data-quick="abastecer">${ICONS.combustivel}<span>Abastecimento</span></button>
       <a class="qtile" href="#/garantias" data-quick="garantias">${ICONS.garantias}<span>Garantias</span>${nExp ? `<b class="badge" aria-label="${nExp} a expirar">${nExp}</b>` : ''}</a>
     </nav>
+    <a class="import-tile" id="tile-importar" href="#/importar?novo=1">${ICONS.importar}<span class="grow"><b>Importar extrato</b><small>CSV, Excel, OFX, QIF ou PDF do seu banco — cria contas e movimentos por si</small></span><span class="chev" aria-hidden="true">›</span></a>
     <input type="file" id="q-file" accept="image/*" capture="environment" hidden>
     <section class="card"><h2>Para onde vai o dinheiro</h2>
       ${s.saidas ? `<div class="donut-wrap">${donut(top, { centerTop: 'Saídas', centerBottom: eur(s.saidas) })}<div class="legend">${legend}</div></div>` : '<p class="muted center">Sem saídas registadas neste mês.</p>'}

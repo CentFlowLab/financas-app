@@ -13,6 +13,7 @@ function accountForm(id) {
     title: id ? 'Editar conta' : 'Nova conta',
     html: `${fld('Nome', inp('nome', a.nome, 'required maxlength="40" placeholder="Ex.: Conta ordenado"'))}
       ${fld('Tipo', sel('tipo', ACCOUNT_TYPES.map((t) => ({ v: t.v, t: `${t.i} ${t.t}` })), a.tipo))}
+      ${fld('IBAN (opcional)', inp('iban', a.iban || '', 'maxlength="40" autocomplete="off" placeholder="PT50 …"'), 'Ajuda a reconhecer a conta ao importar extratos.')}
       ${fld('Saldo inicial (€)', money('saldoInicial', centsToInput(a.saldoInicial)), 'O saldo atual = saldo inicial + movimentos. Num cartão de crédito use um valor negativo para o que já deve.')}
       <div data-for="limite">${fld('Limite do cartão (€, opcional)', money('limite', centsToInput(a.limite)))}</div>
       ${id ? `<label class="check"><input type="checkbox" name="arquivada" ${a.arquivada ? 'checked' : ''}> Arquivar (esconder das listas e dos totais)</label>` : ''}`,
@@ -27,7 +28,7 @@ function accountForm(id) {
       const si = fd.get('saldoInicial').trim() === '' ? 0 : parseEuro(fd.get('saldoInicial'));
       if (Number.isNaN(si)) return 'Saldo inicial inválido.';
       const lim = fd.get('limite')?.trim() ? parseEuro(fd.get('limite')) : null;
-      const rec = { nome, tipo: fd.get('tipo'), saldoInicial: si, limite: fd.get('tipo') === 'cartao' ? lim : null, arquivada: !!fd.get('arquivada') };
+      const rec = { nome, tipo: fd.get('tipo'), iban: (fd.get('iban') || '').replace(/\s/g, '').toUpperCase(), saldoInicial: si, limite: fd.get('tipo') === 'cartao' ? lim : null, arquivada: !!fd.get('arquivada') };
       if (id) Object.assign(a, rec); else S.accounts.push({ id: uid(), ...rec });
       save('accounts');
       toast(id ? 'Conta atualizada' : 'Conta criada', 'ok');
@@ -45,7 +46,7 @@ export default {
       const disp = a.tipo === 'cartao' && a.limite ? `<small class="muted">Disponível ${eur(a.limite + b)} de ${eur(a.limite)}</small>` : '';
       return `<div class="acc-card"><button class="acc-main" data-edit="${a.id}" aria-label="Editar ${esc(a.nome)}"><span class="ico-round big">${t.i}</span><span class="grow"><span class="t">${esc(a.nome)}</span><small>${t.t}</small>${disp}</span><b class="${b < 0 ? 'neg' : ''}" data-bal="${esc(a.nome)}">${eur(b)}</b></button><a class="link small" href="#/movimentos?conta=${a.id}&mes=">Ver movimentos</a></div>`;
     };
-    return `<div class="page-head"><h1 class="page-title">Contas</h1><div class="btn-row"><button class="btn ghost small" data-transfer>🔁 Transferir</button><button class="btn primary small" data-new>${ICONS.plus} Nova conta</button></div></div>
+    return `<div class="page-head"><h1 class="page-title">Contas</h1><div class="btn-row"><a class="btn ghost small" id="btn-importar" href="#/importar?novo=1">${ICONS.importar} Importar extrato</a><button class="btn ghost small" data-transfer>🔁 Transferir</button><button class="btn primary small" data-new>${ICONS.plus} Nova conta</button></div></div>
     <section class="card total-card"><small>Total em contas</small><div class="big ${totalBalance() < 0 ? 'neg' : ''}" id="total-contas">${eur(totalBalance())}</div></section>
     ${accs.length ? accs.map(card).join('') : empty('🏦', 'Sem contas', 'Crie a sua primeira conta para começar a registar movimentos.', '<button class="btn primary" data-new>Nova conta</button>')}
     ${arch.length ? `<details class="card"><summary>Contas arquivadas (${arch.length})</summary>${arch.map(card).join('')}</details>` : ''}`;

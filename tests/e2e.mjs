@@ -489,7 +489,7 @@ await go2('#/categorias'); await p2.locator('[data-edit="cat-salario"]').click()
 eq(await p2.locator('.modal-back [data-for=orc]').isVisible(), false, 'categorias de entrada não têm campo de orçamento'); await modal2().locator('[data-close]').click();
 // exportação inclui orçamentos
 const exp = await p2.evaluate(async () => JSON.parse(await (await import('./js/db.js')).exportData()));
-ok(exp.versao === 2 && exp.dados.categories.find((c) => c.id === 'cat-casa').orcamento === 20000, 'cópia de segurança inclui orçamentos (versão 2)');
+ok(exp.versao === 3 && exp.dados.categories.find((c) => c.id === 'cat-casa').orcamento === 20000, 'cópia de segurança inclui orçamentos (versão 3 do esquema)');
 
 console.log('\n== Migração do esquema (v1 → v2) ==');
 await p2.evaluate(() => new Promise((res, rej) => {
@@ -507,7 +507,7 @@ const mig = await p2.evaluate(async () => {
   const stored = await new Promise((res) => { const r = indexedDB.open('financas-pessoais', 1); r.onsuccess = () => { const g = r.result.transaction('kv').objectStore('kv').get('meta'); g.onsuccess = () => res(g.result); }; });
   return { v: S.meta.versao, st: stored.versao, cats: S.categories.map((c) => [c.id, c.orcamento]) };
 });
-ok(mig.v === 2 && mig.st === 2, 'dados v1 migrados para v2 e guardados (meta.versao=2)');
+ok(mig.v === 3 && mig.st === 3, 'dados v1 migrados até à versão atual (v3) e guardados (meta.versao=3)');
 ok(mig.cats.every(([, o]) => o === null), 'migração normaliza orçamentos (ausente/ inválido/ entrada → null): ' + JSON.stringify(mig.cats));
 await go2('#/painel'); ok((await T2('#view')).includes('Despesa rápida'), 'app abre normalmente após migração');
 

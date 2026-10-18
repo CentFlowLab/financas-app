@@ -1,12 +1,12 @@
 // Armazenamento local (IndexedDB). Estado em memória (S) + persistência por coleção.
 // Modelo de dados (versão 2) — cada módulo futuro acrescenta a sua própria coleção:
 //   accounts, categories, movements, debts, debtPayments,
-//   vehicles, fuel, warranties, receipts, prices
+//   vehicles, fuel, warranties, receipts, prices, imports (histórico de importações), catRules (categorias aprendidas)
 // Valores monetários em cêntimos (inteiros); datas em 'AAAA-MM-DD'; fotos na store 'images' (Blob).
 import { DEFAULT_CATEGORIES, DEFAULT_ACCOUNTS, DEFAULT_SETTINGS } from './defaults.js';
 
-export const SCHEMA_VERSION = 2; // v2: categorias de saída podem ter 'orcamento' (cêntimos/mês)
-export const COLLS = ['accounts', 'categories', 'movements', 'debts', 'debtPayments', 'vehicles', 'fuel', 'warranties', 'receipts', 'prices'];
+export const SCHEMA_VERSION = 3; // v2: categorias de saída podem ter 'orcamento' (cêntimos/mês); v3: importação de extratos (imports, catRules)
+export const COLLS = ['accounts', 'categories', 'movements', 'debts', 'debtPayments', 'vehicles', 'fuel', 'warranties', 'receipts', 'prices', 'imports', 'catRules'];
 export const S = { meta: { versao: SCHEMA_VERSION, criadoEm: new Date().toISOString() }, settings: DEFAULT_SETTINGS() };
 COLLS.forEach((c) => (S[c] = []));
 
@@ -52,7 +52,7 @@ export async function load() {
     S.settings = { ...DEFAULT_SETTINGS(), ...S.settings, ia: { ...DEFAULT_SETTINGS().ia, ...(S.settings.ia || {}) } };
     const antes = S.meta.versao || 1;
     migrate();
-    if (antes !== SCHEMA_VERSION) await save('categories', 'meta'); // guarda o esquema migrado
+    if (antes !== SCHEMA_VERSION) await save('categories', 'imports', 'catRules', 'meta'); // guarda o esquema migrado
   }
   try { navigator.storage?.persist?.(); } catch { /* ignorar */ }
 }
@@ -61,6 +61,9 @@ function migrate() {
   // v1 -> v2: orçamento mensal por categoria (campo opcional 'orcamento', em cêntimos; null = sem orçamento)
   if ((S.meta.versao || 1) < 2) S.categories.forEach((c) => { if (c.orcamento === undefined) c.orcamento = null; });
   S.categories.forEach((c) => { if (!(c.orcamento > 0) || c.tipo !== 'saida') c.orcamento = null; });
+  // v2 -> v3: importação de extratos — histórico de importações e regras de categorização aprendidas (movimentos/contas importados trazem 'importId'; contas 'iban'/'chaves')
+  if (!Array.isArray(S.imports)) S.imports = [];
+  if (!Array.isArray(S.catRules)) S.catRules = [];
   S.meta.versao = SCHEMA_VERSION;
 }
 
