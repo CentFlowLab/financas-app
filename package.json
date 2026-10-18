@@ -1,0 +1,24 @@
+{
+  "name": "financas-app",
+  "version": "1.0.0",
+  "description": "Finanças pessoais — PWA offline (pt-PT)",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "serve": "node scripts/serve.mjs dist 8080",
+    "start": "npm run build && npm run serve",
+    "serve:dev": "node scripts/serve.mjs public 8081",
+    "test": "node tests/e2e.mjs"
+  },
+  "type": "module",
+  "devDependencies": {
+    "playwright": "^1.64.1"
+  },
+  "dependencies": {
+    "@tesseract.js-data/por": "^1.0.0",
+    "tesseract.js": "^7.0.0"
+  },
+  "private": true
+}

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="pt-PT">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Finanças</title>
+<meta name="description" content="As suas finanças pessoais, privadas e offline.">
+<meta name="theme-color" content="#0f766e">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="stylesheet" href="css/app.css">
+<script>try{var t=localStorage.getItem('fin-tema');if(t&&t!=='auto')document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body>
+<div id="app">
+  <aside id="side" aria-label="Navegação"></aside>
+  <main id="view" tabindex="-1"></main>
+  <nav id="tabs" aria-label="Navegação principal"></nav>
+  <button id="fab" class="fab" aria-label="Novo movimento" title="Novo movimento"></button>
+</div>
+<noscript>Esta aplicação precisa de JavaScript.</noscript>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
