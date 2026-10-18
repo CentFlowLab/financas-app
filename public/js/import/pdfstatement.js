@@ -6,6 +6,7 @@ import { norm } from '../util.js';
 import { parseAmount, parseDate, findIban, detectBank, guessAccountType, hclean } from './parse.js';
 import { MONTHS } from './parse.js';
 import { datesIn, isAmt } from './tokens.js';
+import { detectCard, parseCardInfo, validateCard } from './cardstatement.js';
 import { extractSections, concludeSection, makeYearOf, isHeading, layoutFromCols, colsFromLayout, prepare, sigOf, findHeaders } from './layout.js';
 
 const firstCell = (l) => (l.cells && l.cells[0] ? l.cells[0].s : l.text).trim();
@@ -188,7 +189,7 @@ function fingerprints(lines, meta, hdrs, ocr) {
 // ---------- entrada principal ----------
 // opts: { layout (manual), layouts (memorizados: { fp: layout }), implicit, ocr, today }
 export function parseStatementLines(lines, fileName = '', opts = {}) {
-  prepare(lines);
+  prepare(lines, { dotDates: !!opts.layout?.dotDates });
   const meta = extractMeta(lines, fileName);
   const hdrAt0 = findHeaders(lines);
   const { region, loans, resumoLines } = classify(lines, hdrAt0);
@@ -207,6 +208,12 @@ export function parseStatementLines(lines, fileName = '', opts = {}) {
     if (w2.reduce((a, x) => a + x.raw.length, 0) > withRows.reduce((a, x) => a + x.raw.length, 0)) { ex = ex2; withRows = w2; metodo = 'heuristica'; }
   }
   const yearOf = makeYearOf({ period, today: opts.today });
+  // extrato de cartão de crédito (palavras-chave + resumo da conta): uma só conta de cartão, dívida = saldo negativo
+  const cardDet = detectCard(lines);
+  const cinfo = cardDet.isCard ? parseCardInfo(lines) : null;
+  const cardMode = !!cinfo && (!layout?.tipo || layout.tipo === 'cartao');
+  const cardKey = cardMode ? (cinfo.chave || (cinfo.iban ? 'cartao-iban:' + cinfo.iban : 'cartao:extrato')) : null;
+  const cardNome = cardMode ? `${meta.bank?.nome ? meta.bank.nome + ' — ' : ''}Cartão de crédito${cinfo.numero ? ' …' + cinfo.numero.slice(-4) : ''}` : '';
 
   // identidade de cada secção
   const infos = withRows.map((s) => ({ sec: s, ...sectionInfo(s) }));
@@ -219,16 +226,16 @@ export function parseStatementLines(lines, fileName = '', opts = {}) {
   const order = ex.order;
   infos.forEach((info, idx) => {
     const s = info.sec;
-    const tipo = layout?.tipo || guessAccountType(info.ctx);
+    const tipo = layout?.tipo || (cardMode ? 'cartao' : guessAccountType(info.ctx));
     const monthsOf = s.raw.map((r) => r.tokMov).filter(Boolean).map((t) => (order === 'mdy' && (t.kind === 'num' || t.kind === 'short') ? +t.g[0] : t.kind === 'iso' ? +t.g[1] : t.kind === 'mond' ? MONTHS[t.g[0]] : t.kind === 'dmon' ? MONTHS[t.g[1]] : +t.g[1]));
     const yo = period ? yearOf : makeYearOf({ yearHint: meta.yearHint, months: monthsOf, today: opts.today });
     const t = concludeSection(s, { order, yearOf: yo, tipo, layout });
     dropped += t.dropped;
     if (!t.rows.length) return;
     const main = idx === mainIdx || (infos.length === 1);
-    const key = main ? (meta.iban || (info.iban && !meta.iban ? info.iban : '')) : (info.iban || (info.acctNo && 'conta:' + info.acctNo) || (info.card && 'cartao:' + info.card) || 'sec:' + (norm(info.titulo).replace(/[^a-z0-9]+/g, '-') || String(idx + 1)));
-    const nome = main ? (meta.produto || (info.titulo && !/ordem/i.test(info.titulo) ? title(info.titulo) : '')) : title(info.titulo || '');
-    const label = key.startsWith('conta:') || key.startsWith('cartao:') || key.startsWith('sec:') ? (nome || (key.startsWith('cartao:') ? 'Cartão …' + info.card : 'Conta ' + (info.acctNo || ''))) : '';
+    const key = cardMode ? cardKey : main ? (meta.iban || (info.iban && !meta.iban ? info.iban : '')) : (info.iban || (info.acctNo && 'conta:' + info.acctNo) || (info.card && 'cartao:' + info.card) || 'sec:' + (norm(info.titulo).replace(/[^a-z0-9]+/g, '-') || String(idx + 1)));
+    const nome = cardMode ? cardNome : main ? (meta.produto || (info.titulo && !/ordem/i.test(info.titulo) ? title(info.titulo) : '')) : title(info.titulo || '');
+    const label = cardMode ? cardNome : key.startsWith('conta:') || key.startsWith('cartao:') || key.startsWith('sec:') ? (nome || (key.startsWith('cartao:') ? 'Cartão …' + info.card : 'Conta ' + (info.acctNo || ''))) : '';
     for (const r of t.rows) { r.contaKey = key; r.contaLabel = label; r.secId = idx; rows.push(r); }
     semSinalTot += t.rows.filter((r) => r.semSinal).length;
     let opening = s.opening, final = s.final;
@@ -253,6 +260,23 @@ export function parseStatementLines(lines, fileName = '', opts = {}) {
     secoes.push({ tipo: 'conta', titulo: info.titulo || nome || meta.produto || 'Movimentos', n: t.rows.length, key, tipoConta: tipo });
   });
 
+  // cartão: saldos a partir do «Resumo da conta» (dívida anterior/atual como saldos negativos) e validação dos totais
+  let cartao = null;
+  const CA = cardMode ? accounts[cardKey] : null;
+  if (CA) {
+    const val = validateCard(rows.filter((r) => r.contaKey === cardKey), cinfo);
+    const rs = cinfo.resumo;
+    if (rs) {
+      CA.opening = -rs.anterior; CA.final = -rs.atual;
+      CA.diffExtrato = CA.final - (CA.opening + CA.soma); reconN++;
+      if (CA.diffExtrato !== 0) reconBad++;
+    }
+    for (const w of val.avisos) warnings.push(w);
+    CA.cartao = { numero: cinfo.numero, contrato: cinfo.contrato, iban: cinfo.iban, limite: cinfo.limite, tan: cinfo.tan, minimo: cinfo.minimo, dataLimite: cinfo.dataLimite, extratoNo: cinfo.extratoNo, emissaoAnterior: cinfo.emissaoAnterior, emissaoAtual: cinfo.emissaoAtual };
+    CA.nome = cardNome; CA.label = cardNome;
+    cartao = { ...CA.cartao, key: cardKey, validacao: val };
+    CA.chavesExtra = [cinfo.contrato && digits(cinfo.contrato) !== digits(cinfo.numero) ? 'contrato:' + digits(cinfo.contrato) : null, cinfo.iban ? 'cartao-iban:' + cinfo.iban : null].filter(Boolean);
+  }
   const debts = [];
   for (const L of loans) {
     const d = parseLoan({ lines: L.lines, produto: L.produto, numero: L.numero, numeroTxt: L.numeroTxt }, { period }); if (!d) continue;
@@ -272,10 +296,10 @@ export function parseStatementLines(lines, fileName = '', opts = {}) {
   if (!moedas.length && /\b(USD|GBP|CHF)\b|\$\s?\d|£\s?\d/.test(txtDoc) && !/\bEUR\b|€/.test(txtDoc)) warnings.push('O extrato parece estar noutra moeda que não EUR: confirme os valores.');
   const conf = confidence({ metodo, nRows: rows.length, chains, recon: { n: reconN, bad: reconBad }, semSinal: semSinalTot, dropped, ocr: !!opts.ocr });
   const first = withRows[0];
-  const layoutOut = first?.cols ? { v: 1, cols: layoutFromCols(first.cols, ex.pw), dateFmt: layout?.dateFmt || 'auto', useValueDate: !!layout?.useValueDate, invert: !!layout?.invert, skip: layout?.skip || [] } : null;
+  const layoutOut = first?.cols ? { v: 1, cols: layoutFromCols(first.cols, ex.pw), dateFmt: layout?.dateFmt || 'auto', useValueDate: !!layout?.useValueDate, invert: !!layout?.invert, dotDates: !!layout?.dotDates, skip: layout?.skip || [] } : null;
   return {
     rows, meta: { iban: meta.iban, acctNo: meta.acctNo, bank: meta.bank, title: meta.produto }, warnings, ignored: [], anchors: !!(first?.hdr), accounts, debts, secoes, resumo,
-    periodo: period, extratoNo: meta.extratoNo, consolidado: secoes.length > 1 || debts.length > 0 || !!resumo, chain: primeira?.chain || null,
+    periodo: period, extratoNo: cartao?.extratoNo || meta.extratoNo, cartao, consolidado: secoes.length > 1 || debts.length > 0 || !!resumo, chain: primeira?.chain || null,
     confianca: conf, metodo, usadoGuardado, layout: layoutOut, fingerprints: fps0, ordemDatas: order, ocr: !!opts.ocr, nIgnoradas: dropped,
   };
 }
@@ -284,16 +308,22 @@ export function parseStatementLines(lines, fileName = '', opts = {}) {
 // Quantas linhas parecem movimentos (data no início + valor) e se há cabeçalho de tabela: distingue «extrato difícil» de «não é um extrato».
 export function surveyLines(lines) {
   prepare(lines);
-  return { linhas: lines.length, candidatas: lines.filter((l) => l.isRow).length, cabecalhos: findHeaders(lines).size, chars: lines.reduce((a, l) => a + l.text.length, 0) };
+  // «soltas»: linhas com algo parecido com uma data (17.08, 17/08, 2026-08-17…) E um valor (12,50 / ,30EUR) em qualquer posição — sinal de que há movimentos mesmo sem leitura automática
+  const soltas = lines.filter((l) => /(?:^|\s)(?:\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|\d{4}-\d{2}-\d{2})(?:\s|$)/.test(l.text) && /(?:^|\s)[-+]?(?:\d[\d.]*)?[.,]\d{2}(?:\s?(?:€|EUR))?(?:\s|$)/.test(l.text)).length;
+  return { linhas: lines.length, candidatas: lines.filter((l) => l.isRow).length, cabecalhos: findHeaders(lines).size, soltas, chars: lines.reduce((a, l) => a + l.text.length, 0) };
 }
 // Layout inicial para ajustar à mão: o detetado, ou colunas deduzidas das linhas com data+valor
-export function defaultLayout(lines, parsed = null) {
-  if (parsed?.layout?.cols?.length) return JSON.parse(JSON.stringify(parsed.layout));
-  const { pw } = prepare(lines);
+export function defaultLayout(lines, parsed = null, opts = {}) {
+  if (parsed?.layout?.cols?.length && !opts.dotDates) return JSON.parse(JSON.stringify(parsed.layout));
+  const { pw } = prepare(lines, opts.dotDates !== undefined ? { dotDates: !!opts.dotDates } : {});
   const ex = extractSections(lines, { implicit: true });
   const sec = ex.sections.find((x) => x.cols);
   if (!sec) return null;
-  return { v: 1, cols: layoutFromCols(sec.cols, pw), dateFmt: 'auto', useValueDate: false, invert: false, skip: [] };
+  return { v: 1, cols: layoutFromCols(sec.cols, pw), dateFmt: opts.dateFmt || 'auto', useValueDate: false, invert: !!opts.invert, dotDates: !!opts.dotDates, skip: [] };
+}
+// Texto extraído, linha a linha (células separadas por « │ »), para o utilizador ver o que foi lido quando a leitura automática não encontra movimentos
+export function textPreview(lines, max = 220) {
+  return lines.slice(0, max).map((l, i) => ({ i, page: l.page, text: (l.cells?.length ? l.cells.map((c) => String(c.s).trim()).filter(Boolean).join(' │ ') : l.text).slice(0, 240) }));
 }
 // Pré-visualização: linhas a partir de ~4 antes da primeira linha de movimento, com as células distribuídas pelas colunas do layout
 export function previewLines(lines, layout, max = 80) {

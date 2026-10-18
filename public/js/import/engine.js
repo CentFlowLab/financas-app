@@ -6,7 +6,7 @@ import { hclean, decodeBytes, detectDelimiter, parseCSV, autoMap, tableToParsed,
 import { parseStatementLines, surveyLines } from './pdfstatement.js';
 import { readWorkbook, sheetRows, pdfLines, renderPdfPages, ocrLines, imageForOcr } from './loaders.js';
 import { aiRequest, extractJson, aiToParsed } from './ai.js';
-import { categorize, learn } from './categorize.js';
+import { categorize, learn, ensureSuggestedCategories } from './categorize.js';
 
 export const FORMATOS = { csv: 'CSV', xlsx: 'Excel', ofx: 'OFX', qif: 'QIF', pdf: 'PDF', img: 'Imagem' };
 export const ACEITA = '.csv,.txt,.tsv,.xlsx,.xls,.ofx,.qfx,.qif,.pdf,text/csv,application/pdf,.png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -118,7 +118,7 @@ export function analyseVisual(src) {
   src.parsed = parsed;
   if (!parsed.rows.length) {
     if (parsed.debts?.length) throw new Error('Este PDF só tem secções de crédito/empréstimo e nenhuma tabela de movimentos de uma conta. Para registar o crédito, crie a dívida em «Dívidas».');
-    if (sv.candidatas < 2 && !sv.cabecalhos) {
+    if (sv.candidatas < 2 && !sv.cabecalhos && sv.soltas < 3) { // nada que se pareça com movimentos: não é um extrato (se houver pistas, vai para «Ajustar leitura do PDF» com o texto lido)
       throw new Error(src.ocr
         ? 'Não consegui reconhecer um extrato nesta imagem (nem datas nem valores em tabela). Experimente uma foto mais nítida e direita, ou exporte o extrato em CSV, Excel ou OFX.'
         : 'Este PDF não parece ser um extrato bancário: não encontrei movimentos (datas com valores) nem cabeçalhos de tabela. Se for um extrato, exporte-o em CSV, Excel ou OFX no homebanking.');
@@ -218,13 +218,14 @@ function buildGroups(parsed, src) {
   const meta = parsed.meta || {};
   return [...by].map(([key, rows], gi) => {
     const am = parsed.accounts?.[key] || {};
-    const iban = am.iban || (isIbanKey(key) ? key : null) || (!key ? meta.iban : null) || null;
+    const cartao = am.cartao || null; // extrato de cartão de crédito: o IBAN do extrato é o de pagamento (não identifica a conta)
+    const iban = cartao ? null : am.iban || (isIbanKey(key) ? key : null) || (!key ? meta.iban : null) || null;
     const acctNo = am.acctNo || (!key ? meta.acctNo : null) || null;
     const bank = meta.bank;
     const lbl = rows.find((r) => r.contaLabel)?.contaLabel || '';
     const last4 = (iban || acctNo || '').slice(-4);
     const nome = am.nome || (key && !iban && lbl ? lbl : last4 ? `${bank?.nome || 'Conta'} …${last4}` : bank ? bank.nome : stem(src.name));
-    const matchKeys = [iban, acctNo ? 'conta:' + acctNo : null, key || null].filter(Boolean);
+    const matchKeys = [iban, acctNo ? 'conta:' + acctNo : null, key || null, ...(am.chavesExtra || [])].filter(Boolean);
     if (!matchKeys.length) matchKeys.push('arq:' + norm(stem(src.name)));
     const tipo = am.tipo && am.tipo !== 'ordem' ? am.tipo : guessAccountType(`${nome} ${src.name} ${key ? '' : meta.title || ''}`);
     // PDF/extrato com «Saldo Inicial» e «Saldo Final» explícitos: usam-se tal e qual (a diferença, se existir, fica visível)
@@ -232,7 +233,8 @@ function buildGroups(parsed, src) {
     const bal = am.opening != null && am.final != null
       ? { opening: am.opening, final: am.final, asc: true, fonte: 'extrato', explicito: true, inicio: per?.ini || null, fim: per?.fim || null }
       : (() => { const b = balanceInfo(rows, am.ledger); return b ? { ...b, inicio: per?.ini || null, fim: am.ledger?.data || per?.fim || null } : b; })();
-    return { key, gi, diag: am.chain ? { quebradas: am.chain.broken, corrigidos: am.chain.fixed, diffExtrato: am.diffExtrato ?? 0 } : null, label: iban ? ibanPretty(iban) : lbl || (acctNo ? 'Conta ' + acctNo : stem(src.name)), iban, acctNo, bank, matchKeys, rows, bal, choice: 'new', novo: { nome: uniqueAccountName(nome), tipo, saldoInicial: bal ? bal.opening : 0 } };
+    const lim = cartao?.limite ?? null;
+    return { cartao, guardarCartao: !!cartao, key, gi, diag: am.chain ? { quebradas: am.chain.broken, corrigidos: am.chain.fixed, diffExtrato: am.diffExtrato ?? 0 } : null, label: iban ? ibanPretty(iban) : lbl || (acctNo ? 'Conta ' + acctNo : stem(src.name)), iban, acctNo, bank, matchKeys, rows, bal, choice: 'new', novo: { nome: uniqueAccountName(nome), tipo, saldoInicial: bal ? bal.opening : 0, limite: lim } };
   });
 }
 
@@ -250,6 +252,7 @@ function matchExisting(g, prev) {
 // Sessão de importação: grupos (contas), linhas, duplicados, transferências
 export function buildSession(src) {
   const parsed = getParsed(src);
+  ensureSuggestedCategories();
   const groups = buildGroups(parsed, src);
   const prev = S.imports.find((i) => i.hash === src.hash) || null;
   const rows = [];
@@ -305,10 +308,10 @@ export function markDuplicates(sess) {
       pool.get(k).push({ m, used: false });
     }
     for (const r of g.rows) {
-      r.dup = false; r.dupMotivo = '';
+      r.dup = false; r.dupMotivo = ''; r.dupMov = null;
       if (acc) {
         if (r.extId && ext.has(r.extId)) { r.dup = true; r.dupMotivo = 'já importado (mesmo identificador)'; }
-        else { const c = pool.get(r.data + '|' + r.valor)?.find((x) => !x.used && descSimilar(x.m.nota, r.desc)); if (c) { c.used = true; r.dup = true; r.dupMotivo = 'mesmo dia, valor e descrição semelhante a um movimento existente'; } }
+        else { const c = pool.get(r.data + '|' + r.valor)?.find((x) => !x.used && descSimilar(x.m.nota, r.desc)); if (c) { c.used = true; r.dup = true; r.dupMov = c.m; r.dupMotivo = 'mesmo dia, valor e descrição semelhante a um movimento existente'; } }
       }
       if (!r.touched) r.checked = !r.dup;
     }
@@ -328,14 +331,35 @@ export function detectTransfers(sess) {
     for (const i of sess.rows) {
       if (i.valor !== -o.valor || !free(i) || idOf(i.g) === idOf(o.g)) continue;
       const d = dayDiff(i.data, o.data);
-      if (d <= 3 && d < bd) { best = i; bd = d; }
+      if (d <= XFER_DAYS && d < bd) { best = i; bd = d; }
     }
     if (best) { o.pairId = best.pairId = ++n; o.xfer = best.xfer = true; o.pairWith = best; best.pairWith = o; o.checked = best.checked = o.checked && best.checked; }
   }
 }
-export function refresh(sess) { markDuplicates(sess); detectTransfers(sess); }
+// Pagamentos entre cartão e conta: a linha do extrato que está a ser importado tem um movimento OPOSTO já registado noutra conta
+// (mesmo valor, ±5 dias, ainda não é transferência) -> propõe transformar esse movimento numa transferência interna em vez de criar despesa/receita.
+// Fica ligado por omissão quando um dos lados é um cartão de crédito; nos restantes casos é apenas sugerido.
+export const XFER_DAYS = 5;
+export function detectExistingTransfers(sess) {
+  sess.rows.forEach((r) => { r.pairEx = null; r.xferEx = false; });
+  const used = new Set();
+  const rows = sess.rows.filter((r) => !r.dup && !r.pairId).sort((a, b) => a.data.localeCompare(b.data));
+  for (const r of rows) {
+    const here = accOf(r.g);
+    let best = null, bd = 99;
+    for (const m of S.movements) {
+      if (m.tipo === 'transferencia' || used.has(m.id) || (here && m.contaId === here.id)) continue;
+      const sv = signedFor(m, m.contaId); if (sv !== -r.valor) continue;
+      const d = dayDiff(m.data, r.data); if (d > XFER_DAYS || d >= bd) continue;
+      const a = S.accounts.find((x) => x.id === m.contaId); if (!a || a.arquivada) continue;
+      best = { m, a }; bd = d;
+    }
+    if (best) { used.add(best.m.id); r.pairEx = { mov: best.m, acc: best.a, dias: bd }; r.xferEx = (here ? here.tipo : r.g.novo?.tipo) === 'cartao' || best.a.tipo === 'cartao'; }
+  }
+}
+export function refresh(sess) { markDuplicates(sess); detectTransfers(sess); detectExistingTransfers(sess); }
 
-export function setPair(r, on) { r.xfer = on; if (r.pairWith) r.pairWith.xfer = on; }
+export function setPair(r, on) { if (r.pairEx && !r.pairWith) { r.xferEx = on; return; } r.xfer = on; if (r.pairWith) r.pairWith.xfer = on; }
 
 // ---------- resumo e reconciliação ----------
 export function summarize(sess) {
@@ -345,6 +369,7 @@ export function summarize(sess) {
     if (r.dup && !r.checked) dups++;
     if (!r.checked) continue;
     if (r.pairWith && r.xfer && r.pairWith.checked) { if (!done.has(r.pairId)) { done.add(r.pairId); nTransf++; n++; } continue; }
+    if (r.pairEx && r.xferEx) { nTransf++; n++; continue; }
     n++;
     if (r.valor > 0) entradas += r.valor; else saidas += -r.valor;
   }
@@ -374,7 +399,9 @@ export function openingCheck(g) {
   const inicio = g.bal.inicio || g.rows.map((r) => r.data).sort()[0];
   if (!inicio) return null;
   const ate = addDay(inicio, -1);
-  const conta = accountBalance(acc, ate) + (g.ajusteInicial || 0);
+  // cartão: os movimentos têm a data da compra (pode ser anterior ao início do período do extrato) -> saldo antes deste extrato = saldo até ao fim do período sem os movimentos deste extrato já existentes (duplicados)
+  const jaDeste = g.cartao ? g.rows.reduce((a, r) => a + (r.dupMov ? (signedFor(r.dupMov, acc.id) || 0) : 0), 0) : 0;
+  const conta = (g.cartao ? accountBalance(acc, g.bal.fim || undefined) - jaDeste : accountBalance(acc, ate)) + (g.ajusteInicial || 0);
   return { esperado: g.bal.opening, conta, diff: g.bal.opening - conta, ate, temMovimentosDepois: S.movements.some((m) => (m.contaId === acc.id || m.contaDestinoId === acc.id) && m.data > (g.bal.fim || inicio)) };
 }
 // Causas prováveis de uma diferença na reconciliação (ordenadas por probabilidade)
@@ -396,11 +423,11 @@ export function reconCauses(g, r = reconcile(g)) {
 
 // ---------- gravar / anular ----------
 // Aplica a importação ao estado (síncrono); o chamador atualiza o estado da interface e depois chama persist()
-export const persist = () => save('accounts', 'movements', 'imports', 'catRules', 'debts');
+export const persist = () => save('accounts', 'movements', 'imports', 'catRules', 'debts', 'categories');
 export function commit(sess) {
   const importId = uid();
   const now = Date.now();
-  const contas = [], contaIds = [], grupos = [], ajustes = [], dividaIds = [];
+  const contas = [], contaIds = [], grupos = [], ajustes = [], dividaIds = [], limites = [], convertidos = [];
   const accOf = new Map();
   for (const g of sess.groups) {
     const used = g.rows.some((r) => r.checked);
@@ -408,12 +435,14 @@ export function commit(sess) {
     if (g.choice === 'new') {
       if (!used) { grupos.push({ key: g.key, contaId: null }); continue; }
       id = uid();
-      S.accounts.push({ id, nome: uniqueAccountName(g.novo.nome.trim() || g.label), tipo: g.novo.tipo, saldoInicial: g.novo.saldoInicial || 0, limite: null, arquivada: false, iban: g.iban || '', chaves: [...g.matchKeys], importId });
+      const cartaoMeta = g.cartao && g.guardarCartao && g.novo.tipo === 'cartao';
+      S.accounts.push({ id, nome: uniqueAccountName(g.novo.nome.trim() || g.label), tipo: g.novo.tipo, saldoInicial: g.novo.saldoInicial || 0, limite: cartaoMeta ? g.cartao.limite ?? null : null, ...(cartaoMeta && g.cartao.tan != null ? { tan: g.cartao.tan } : {}), arquivada: false, iban: g.iban || '', chaves: [...g.matchKeys], importId });
       contaIds.push(id); contas.push({ id, nome: S.accounts[S.accounts.length - 1].nome, nova: true });
     } else {
       const a = S.accounts.find((x) => x.id === id);
       if (used && g.ajusteInicial) { ajustes.push({ contaId: id, de: a.saldoInicial || 0, delta: g.ajusteInicial }); a.saldoInicial = (a.saldoInicial || 0) + g.ajusteInicial; }
       a.chaves = [...new Set([...(a.chaves || []), ...g.matchKeys])];
+      if (used && g.cartao && g.guardarCartao && a.tipo === 'cartao' && ((g.cartao.limite != null && g.cartao.limite !== a.limite) || (g.cartao.tan != null && g.cartao.tan !== a.tan))) { limites.push({ contaId: id, limite: a.limite ?? null, tan: a.tan ?? null }); if (g.cartao.limite != null) a.limite = g.cartao.limite; if (g.cartao.tan != null) a.tan = g.cartao.tan; }
       if (g.iban && !a.iban) a.iban = g.iban;
       if (used) contas.push({ id, nome: a.nome, nova: false });
     }
@@ -433,6 +462,14 @@ export function commit(sess) {
       nTransf++;
       continue;
     }
+    if (r.pairEx && r.xferEx) { // converte o movimento já registado noutra conta numa transferência interna (não cria despesa/receita)
+      const m = r.pairEx.mov, antes = { id: m.id, tipo: m.tipo, categoriaId: m.categoriaId ?? null, contaId: m.contaId, contaDestinoId: m.contaDestinoId ?? null };
+      const eu = from;
+      if (m.tipo === 'saida') { m.contaDestinoId = eu; } else { m.contaDestinoId = m.contaId; m.contaId = eu; }
+      m.tipo = 'transferencia'; m.categoriaId = null; m.nota = m.nota || r.desc;
+      convertidos.push(antes); nTransf++;
+      continue;
+    }
     const tipo = tipoOf(r);
     push({ tipo, valor: Math.abs(r.valor), data: r.data, contaId: from, categoriaId: r.cat, nota: r.desc, extId: r.extId || null });
     if (tipo === 'entrada') entradas += r.valor; else saidas += -r.valor;
@@ -445,7 +482,7 @@ export function commit(sess) {
     dividaIds.push(id);
   }
   const dups = sess.rows.filter((r) => r.dup && !r.checked).length;
-  const rec = { id: importId, ficheiro: sess.src.name, formato: sess.src.format, hash: sess.src.hash, data: new Date().toISOString(), nMov: movIds.length, nLinhas: sess.rows.length, duplicados: dups, transferencias: nTransf, entradas, saidas, movIds, contaIds, contas, grupos, aprendidas, ajustes, dividaIds, periodo: sess.parsed?.periodo || null };
+  const rec = { id: importId, ficheiro: sess.src.name, formato: sess.src.format, hash: sess.src.hash, data: new Date().toISOString(), nMov: movIds.length, nLinhas: sess.rows.length, duplicados: dups, transferencias: nTransf, entradas, saidas, movIds, contaIds, contas, grupos, aprendidas, ajustes, dividaIds, limites, convertidos, periodo: sess.parsed?.periodo || null };
   S.imports.push(rec);
   return rec;
 }
@@ -453,6 +490,8 @@ export function commit(sess) {
 export function undoImport(id) {
   const imp = S.imports.find((i) => i.id === id);
   if (!imp) return null;
+  for (const c of imp.convertidos || []) { const m = S.movements.find((x) => x.id === c.id); if (m) { m.tipo = c.tipo; m.categoriaId = c.categoriaId; m.contaId = c.contaId; if (c.contaDestinoId) m.contaDestinoId = c.contaDestinoId; else delete m.contaDestinoId; } }
+  for (const l of imp.limites || []) { const a = S.accounts.find((x) => x.id === l.contaId); if (a) { a.limite = l.limite; if (l.tan == null) delete a.tan; else a.tan = l.tan; } }
   const before = S.movements.length;
   S.movements = S.movements.filter((m) => m.importId !== id);
   const movs = before - S.movements.length;

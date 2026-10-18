@@ -8,7 +8,7 @@ import { ICONS } from '../icons.js';
 import { loadSource, prepare, buildSession, isTable, getParsed, refresh, applyManualLayout, parseVisual, interpretWithAI, aiAvailable, aiHost, listLayouts, forgetLayout, rememberPdfLayout, rememberTableLayout, mapChangedFromAuto, summarize, reconcile, openingCheck, reconCauses, commit, persist, undoImport, setPair, suggest, tipoOf, FORMATOS, ACEITA } from '../import/engine.js';
 import { applyMapping, autoMap, cellStr } from '../import/parse.js';
 import { sampleCSV } from '../import/sample.js';
-import { defaultLayout, previewLines } from '../import/pdfstatement.js';
+import { defaultLayout, previewLines, textPreview } from '../import/pdfstatement.js';
 
 let W = null; // estado do assistente (persiste enquanto navega entre vistas)
 const PAGE = 150;
@@ -122,9 +122,11 @@ function stepColunas() {
 const ROLES = [['ignore', '— ignorar —'], ['date', 'Data'], ['dateValue', 'Data valor'], ['desc', 'Descrição'], ['debit', 'Débito (saídas)'], ['credit', 'Crédito (entradas)'], ['amount', 'Valor (±)'], ['balance', 'Saldo']];
 function initAjuste() {
   const src = W.src;
-  const layout = src.manual ? JSON.parse(JSON.stringify(src.manual)) : defaultLayout(src.lines, src.parsed);
-  if (layout) { layout.skip ||= []; layout.dateFmt ||= 'auto'; }
-  return { layout, lembrar: true, res: layout ? parseVisual(src, { layout }) : null };
+  let layout = src.manual ? JSON.parse(JSON.stringify(src.manual)) : defaultLayout(src.lines, src.parsed);
+  // sem nenhuma linha reconhecida: layout «vazio» — o ecrã mostra o texto lido e opções (formato das datas, datas dd.mm…) para tentar outra vez
+  if (!layout) layout = { v: 1, cols: [], dateFmt: 'auto', useValueDate: false, invert: false, dotDates: false, skip: [], vazio: true };
+  layout.skip ||= []; layout.dateFmt ||= 'auto';
+  return { layout, lembrar: true, res: layout.vazio ? null : parseVisual(src, { layout }) };
 }
 function ajResultHtml(res) {
   if (!res) return '';
@@ -141,12 +143,22 @@ function stepAjuste() {
   const motivo = W.ajusteMotivo || '';
   const head = `<section class="card" id="imp-ajuste"><h2>Ajustar leitura do PDF</h2>
     <p class="small muted">📄 <b>${esc(src.name)}</b>${src.ocr ? ' · lido por OCR' : ''}. ${motivo ? `<b>${esc(motivo)}</b> ` : ''}Indique o que é cada coluna e os formatos; a aplicação lembra-se do layout para os próximos extratos deste banco. <span class="muted">Na leitura manual todas as linhas são tratadas como uma única tabela (uma conta).</span></p>`;
-  if (!lay) {
-    return `${head}<p class="hint warn" role="alert">Não encontrei linhas com <b>data</b> e <b>valor</b> neste ficheiro, por isso não há colunas para ajustar.${src.ocr ? ' Uma foto mais nítida e direita (ou o PDF original) costuma resolver.' : ' Se o extrato for uma imagem dentro do PDF, tente exportá-lo em CSV, Excel ou OFX.'}</p>
-    <div id="imp-ai-msg" role="alert">${W.aiMsg ? `<p class="hint warn">${esc(W.aiMsg)}</p>` : ''}</div>
-    <div class="btn-row">${aiAvailable() ? '<button type="button" class="btn" data-ia>✨ Interpretar com IA</button>' : ''}<button type="button" class="btn ghost" data-restart>Escolher outro ficheiro</button></div></section>`;
-  }
   const o = (v, t, cur) => `<option value="${v}" ${String(cur) === String(v) ? 'selected' : ''}>${t}</option>`;
+  const txtPreview = (open) => { const tp = textPreview(src.lines, 220); return `<details class="more-opts" id="aj-text-details" ${open ? 'open' : ''}><summary>Texto lido do documento (${src.lines.length} linhas${src.lines.length > tp.length ? `, primeiras ${tp.length}` : ''})</summary>
+      <pre class="aj-text" id="aj-text" tabindex="0" aria-label="Texto extraído do documento" style="max-height:320px;overflow:auto;font-size:11px;white-space:pre-wrap;background:var(--surface-2,#f4f4f4);padding:8px;border-radius:8px">${tp.map((l) => `<span data-l="${l.i}">${String(l.page).padStart(1, ' ')}│ ${esc(l.text)}</span>`).join('\n')}</pre></details>`; };
+  if (!lay || lay.vazio) {
+    const L0 = lay || { dateFmt: 'auto', dotDates: false, invert: false };
+    return `${head}<p class="hint warn" id="aj-vazio" role="alert">Não encontrei linhas com <b>data</b> e <b>valor</b> neste ficheiro com a leitura automática. Veja abaixo o texto que li e experimente as opções — por exemplo, <b>datas curtas com ponto</b> (17.08) ou outro formato de data.${src.ocr ? ' Uma foto mais nítida e direita (ou o PDF original) costuma resolver.' : ''}</p>
+    ${txtPreview(true)}
+    <div class="aj-opts grid2">
+      <label class="fld"><span>Formato das datas</span><select name="aj-datefmt">${o('auto', 'Automático', L0.dateFmt)}${o('dmy', 'dia-mês-ano', L0.dateFmt)}${o('mdy', 'mês-dia-ano', L0.dateFmt)}</select></label>
+      <label class="fld"><span>Tipo de conta (ajuda a deduzir entradas/saídas)</span><select name="aj-tipo">${o('', 'Automático', L0.tipo || '')}${o('ordem', 'Conta à ordem / poupança', L0.tipo || '')}${o('cartao', 'Cartão de crédito', L0.tipo || '')}</select></label>
+    </div>
+    <label class="check"><input type="checkbox" name="aj-dotdates" ${L0.dotDates ? 'checked' : ''}> As datas vêm como <b>dd.mm</b> (ex.: 17.08) — não confundir com valores</label>
+    <label class="check"><input type="checkbox" name="aj-invert" ${L0.invert ? 'checked' : ''}> Inverter sinais (entradas ↔ saídas)</label>
+    <div id="imp-ai-msg" role="alert">${W.aiMsg ? `<p class="hint warn">${esc(W.aiMsg)}</p>` : ''}${aj.tentou ? '<p class="hint warn" id="aj-tentou">Ainda não encontrei movimentos com estas opções. Experimente outra combinação, ou exporte o extrato em CSV, Excel ou OFX no homebanking.</p>' : ''}</div>
+    <div class="btn-row"><button type="button" class="btn primary" data-aj-try>Tentar ler com estas opções</button>${aiAvailable() ? '<button type="button" class="btn" data-ia>✨ Interpretar com IA</button>' : ''}<button type="button" class="btn ghost" data-restart>Escolher outro ficheiro</button></div></section>`;
+  }
   const cols = lay.cols, skip = new Set(lay.skip || []);
   const pv = previewLines(src.lines, lay, 70);
   const hasVal = cols.some((c) => c.role === 'dateValue');
@@ -157,11 +169,13 @@ function stepAjuste() {
     </div>
     <label class="check"><input type="checkbox" name="aj-valuedate" ${lay.useValueDate ? 'checked' : ''} ${hasVal ? '' : 'disabled'}> Usar a «Data valor» em vez da data do movimento</label>
     <label class="check"><input type="checkbox" name="aj-invert" ${lay.invert ? 'checked' : ''}> Inverter sinais (entradas ↔ saídas)</label>
+    <label class="check"><input type="checkbox" name="aj-dotdates" ${lay.dotDates ? 'checked' : ''}> As datas vêm como <b>dd.mm</b> (ex.: 17.08) — não confundir com valores</label>
     <div id="aj-body"><p class="small"><b>Colunas lidas</b> — escolha o papel de cada uma no cabeçalho da tabela; marque «ignorar» nas linhas que não são movimentos (títulos, rodapés, avisos):</p>
     <div class="tbl-wrap aj-wrap"><table class="tbl aj-tbl" id="aj-table" aria-label="Linhas lidas do documento"><thead><tr><th>Ignorar</th>${cols.map((c, j) => `<th><select data-aj-role="${j}" aria-label="Papel da coluna ${j + 1}">${ROLES.map(([v, t]) => o(v, t, c.role)).join('')}</select></th>`).join('')}</tr></thead>
     <tbody>${pv.map((l) => l.cells ? `<tr class="${skip.has(l.sig) ? 'skip' : ''}" data-sig="${esc(l.sig)}"><td><input type="checkbox" data-aj-skip="${esc(l.sig)}" ${skip.has(l.sig) ? 'checked' : ''} aria-label="Ignorar esta linha"></td>${l.cells.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>` : `<tr class="txt ${skip.has(l.sig) ? 'skip' : ''}" data-sig="${esc(l.sig)}"><td><input type="checkbox" data-aj-skip="${esc(l.sig)}" ${skip.has(l.sig) ? 'checked' : ''} aria-label="Ignorar esta linha"></td><td colspan="${cols.length}">${esc(l.text)}</td></tr>`).join('')}</tbody></table></div>
     <p class="small muted">Ignorar uma linha ignora todas as linhas iguais (os números contam como iguais) — útil para cabeçalhos e rodapés repetidos.</p></div>
     <div id="aj-result" aria-live="polite"><p class="small muted">Com esta leitura:</p>${ajResultHtml(aj.res)}</div>
+    ${txtPreview(!aj.res?.rows.length)}
     <div id="imp-ai-msg" role="alert">${W.aiMsg ? `<p class="hint warn">${esc(W.aiMsg)}</p>` : ''}</div>
     <label class="check"><input type="checkbox" name="aj-lembrar" ${aj.lembrar ? 'checked' : ''}> Lembrar este layout para os próximos extratos deste banco</label>
     ${aiAvailable() ? '<div class="btn-row"><button type="button" class="btn small" data-ia>✨ Interpretar com IA</button></div>' : ''}
@@ -202,6 +216,29 @@ function reconText(g) {
       <li><b>Continuar mesmo assim</b>: os movimentos são importados como estão e a diferença fica por explicar.</li></ul>
     ${btns.length ? `<div class="btn-row">${btns.join('')}</div>` : ''}</div>`;
 }
+// ---------- cartão de crédito: resumo do extrato, validação dos totais, continuidade, limite e TAN ----------
+const pct = (v) => String(v).replace('.', ',') + '%';
+function cardPanelHtml(g) {
+  const c = g.cartao; if (!c) return '';
+  const val = W.sess.parsed?.cartao?.validacao, rs = val?.resumo;
+  const mark = (okk) => (okk === null || okk === undefined ? '' : okk ? ' <span class="pos" aria-label="confere">✓</span>' : ' <span class="neg" aria-label="não confere">⚠️</span>');
+  const tbl = rs ? `<div class="tbl-wrap"><table class="tbl small" id="imp-card-resumo" aria-label="Resumo do extrato do cartão"><thead><tr><th>Resumo do extrato</th><th class="r">Extrato</th><th class="r">Lido</th></tr></thead><tbody>
+      <tr><td>Dívida anterior</td><td class="r">${eur(rs.anterior)}</td><td class="r">${eur(rs.anterior)}</td></tr>
+      <tr><td>− Créditos</td><td class="r">${rs.creditos == null ? '—' : eur(rs.creditos)}</td><td class="r" data-card-cre>${eur(val.creditos)} <small>(${val.nCre})</small>${mark(val.diffCre === null ? null : val.diffCre === 0)}</td></tr>
+      <tr><td>+ Débitos</td><td class="r">${rs.debitos == null ? '—' : eur(rs.debitos)}</td><td class="r" data-card-deb>${eur(val.debitos)} <small>(${val.nDeb})</small>${mark(val.diffDeb === null ? null : val.diffDeb === 0)}</td></tr>
+      <tr><td><b>= Dívida atual</b></td><td class="r"><b>${eur(rs.atual)}</b></td><td class="r" data-card-atual><b>${eur(rs.anterior - val.creditos + val.debitos)}</b>${mark(val.diffSaldo === 0)}</td></tr></tbody></table></div>
+    <p class="small ${val.ok ? 'recon ok' : 'recon bad'}" id="imp-card-ok" role="${val.ok ? 'status' : 'alert'}">${val.ok ? `✓ Os totais lidos coincidem com o resumo do extrato (${eur(rs.debitos)} em débitos, ${eur(rs.creditos)} em créditos).` : `⚠️ ${esc(val.avisos.join(' '))}`}</p>` : '<p class="hint warn" id="imp-card-sem-resumo">Não encontrei o «Resumo da conta» deste extrato: não consigo validar os totais.</p>';
+  const oc = g.choice !== 'new' && g.bal?.explicito ? openingCheck(g) : null;
+  const cont = oc ? (oc.diff === 0
+    ? `<p class="small recon ok" id="imp-card-cont">✓ Continuidade: a dívida registada antes deste extrato (${eur(-oc.conta)}) coincide com o «saldo em dívida do extrato anterior».</p>`
+    : `<p class="small recon bad" id="imp-card-cont" role="alert">⚠️ Continuidade: o extrato anterior indica ${eur(-oc.esperado)} em dívida, mas a conta tinha ${eur(-oc.conta)} antes deste extrato (diferença ${eur(Math.abs(oc.diff))}). Provavelmente falta importar o extrato do mês anterior, ou há movimentos registados à mão.</p>`) : '';
+  const meta = [c.limite != null ? `limite de crédito <b>${eur(c.limite)}</b>` : '', c.tan != null ? `TAN <b>${pct(c.tan)}</b>` : ''].filter(Boolean);
+  const extra = [c.minimo != null ? `montante mínimo a pagar <b>${eur(c.minimo)}</b>` : '', c.dataLimite ? `até <b>${fmtDate(c.dataLimite)}</b>` : ''].filter(Boolean);
+  return `<div class="card-panel" id="imp-card" data-card><p class="small"><b>💳 Cartão de crédito${c.numero ? ' ' + esc(c.numero) : ''}${c.extratoNo ? ' · extrato ' + esc(c.extratoNo) : ''}.</b> A dívida fica como <b>saldo negativo</b>: compras, comissões e juros aumentam-na; pagamentos e estornos reduzem-na. Saldo inicial = −${rs ? eur(rs.anterior) : 'dívida anterior'}.</p>
+    ${tbl}${cont}
+    ${meta.length ? `<label class="check"><input type="checkbox" name="g-cartao" ${g.guardarCartao ? 'checked' : ''}> <span>Guardar ${meta.join(' e ')} na conta (mostra o crédito disponível em «Contas»)</span></label>` : ''}
+    ${extra.length ? `<p class="small muted">Pagamento: ${extra.join(' · ')}.</p>` : ''}</div>`;
+}
 function groupCard(g) {
   const dates = g.rows.map((r) => r.data).sort();
   const accOpts = [`<option value="new" ${g.choice === 'new' ? 'selected' : ''}>➕ Criar conta nova</option>`, ...S.accounts.filter((a) => !a.arquivada).map((a) => `<option value="${a.id}" ${g.choice === a.id ? 'selected' : ''}>${accountTypeInfo(a.tipo).i} ${esc(a.nome)}</option>`)].join('');
@@ -215,6 +252,7 @@ function groupCard(g) {
       <label class="fld"><span>Tipo</span><select name="g-tipo">${ACCOUNT_TYPES.map((t) => `<option value="${t.v}" ${g.novo.tipo === t.v ? 'selected' : ''}>${t.i} ${t.t}</option>`).join('')}</select></label></div>
       <label class="fld"><span>Saldo inicial (€)</span><input name="g-saldo" value="${esc(centsToInput(g.novo.saldoInicial))}" inputmode="decimal" autocomplete="off"><small>${g.bal ? 'Calculado a partir do saldo do extrato, para que o saldo da conta fique igual ao do banco.' : 'O extrato não indica saldos; pode ajustar se souber o saldo antes do primeiro movimento.'}</small></label>
     </div>` : `<p class="small">Conta existente: <b>${esc(existing?.nome || '')}</b> · saldo atual ${eur(accountBalance(existing))}. O saldo inicial da conta não é alterado; movimentos já existentes (mesmo dia, valor e descrição) são marcados como duplicados.</p>`}
+    ${cardPanelHtml(g)}
     ${reconText(g)}
   </section>`;
 }
@@ -249,17 +287,18 @@ const catOptions = (tipo, cur) => S.categories.filter((c) => c.tipo === tipo).ma
 const accLabel = (g) => (g.choice === 'new' ? g.novo.nome : S.accounts.find((a) => a.id === g.choice)?.nome || '');
 function rowHtml(r) {
   const tipo = tipoOf(r), multi = W.sess.groups.length > 1;
-  const xf = r.pairWith && r.xfer;
+  const xf = (r.pairWith && r.xfer) || (r.pairEx && r.xferEx);
   const other = r.pairWith;
   const chips = [];
   if (r.dup) chips.push(`<span class="chip warn" title="${esc(r.dupMotivo)}">⚠️ Possível duplicado</span>`);
   if (r.pairWith) chips.push(`<span class="chip ${xf ? 'ok' : ''}">🔁 ${xf ? `Transferência ${r.valor < 0 ? esc(accLabel(r.g)) + ' → ' + esc(accLabel(other.g)) : esc(accLabel(other.g)) + ' → ' + esc(accLabel(r.g))}` : 'Possível transferência'}</span>`);
+  if (r.pairEx && !r.pairWith) { const pe = r.pairEx; chips.push(`<span class="chip ${r.xferEx ? 'ok' : ''}" data-pair-ex title="Movimento já registado em «${esc(pe.acc.nome)}» (${fmtDate(pe.mov.data)}${pe.dias ? `, ${pe.dias} dia${pe.dias === 1 ? '' : 's'} de diferença` : ''})">🔁 ${r.xferEx ? `Transferência ${r.valor < 0 ? esc(accLabel(r.g)) + ' → ' + esc(pe.acc.nome) : esc(pe.acc.nome) + ' → ' + esc(accLabel(r.g))} (converte o movimento já registado)` : `Possível transferência com «${esc(pe.acc.nome)}»`}</span>`); }
   if (r.catFonte === 'aprendida' && !xf) chips.push('<span class="chip" title="Categoria aprendida com as suas correções">🧠 Aprendida</span>');
   if (r.semSinal) chips.push('<span class="chip warn" title="Não consegui perceber se é entrada ou saída; use «É entrada / É saída» para corrigir">Sinal incerto</span>');
   if (multi) chips.push(`<span class="chip">${esc(accLabel(r.g))}</span>`);
   const ctl = xf ? '' : `<select data-cat aria-label="Categoria">${catOptions(tipo, r.cat)}</select>`;
   const flip = xf ? '' : `<button type="button" class="btn small ghost" data-flip aria-label="Trocar para ${tipo === 'entrada' ? 'saída' : 'entrada'}">⇄ ${tipo === 'entrada' ? 'É saída' : 'É entrada'}</button>`;
-  const xbtn = r.pairWith ? `<button type="button" class="btn small ghost" data-xfer>${xf ? 'Não é transferência' : 'Tratar como transferência'}</button>` : '';
+  const xbtn = r.pairWith || r.pairEx ? `<button type="button" class="btn small ghost" data-xfer>${xf ? 'Não é transferência' : 'Tratar como transferência'}</button>` : '';
   return `<div class="irow ${r.dup ? 'dup' : ''} ${r.checked ? '' : 'off'}" data-r="${r.id}">
     <label class="chk"><input type="checkbox" data-chk ${r.checked ? 'checked' : ''} aria-label="Importar: ${esc(r.desc)}"></label>
     <div class="im"><div class="l1"><span class="d">${fmtDate(r.data)}</span><span class="desc" title="${esc(r.desc)}">${esc(r.desc) || '(sem descrição)'}</span><b class="amt ${xf ? 'muted' : r.valor < 0 ? 'neg' : 'pos'}">${xf ? eur(Math.abs(r.valor)) : sgn(r.valor)}</b></div>
@@ -290,7 +329,7 @@ const debtsChecked = () => (W.sess.debts || []).filter((d) => d.checked && !d.ex
 const canCommit = (sm) => (sm.n || debtsChecked()) && W.sess.revisto;
 function filteredRows() {
   const f = W.filtro;
-  return W.sess.rows.filter((r) => (f === 'todos') || (f === 'dup' && r.dup) || (f === 'transf' && r.pairWith) || (f === 'desmarcados' && !r.checked));
+  return W.sess.rows.filter((r) => (f === 'todos') || (f === 'dup' && r.dup) || (f === 'transf' && (r.pairWith || r.pairEx)) || (f === 'desmarcados' && !r.checked));
 }
 function listHtml() {
   const rows = filteredRows();
@@ -300,7 +339,7 @@ function listHtml() {
 }
 function pillsHtml() {
   const r = W.sess.rows;
-  const cnt = { todos: r.length, dup: r.filter((x) => x.dup).length, transf: r.filter((x) => x.pairWith).length, desmarcados: r.filter((x) => !x.checked).length };
+  const cnt = { todos: r.length, dup: r.filter((x) => x.dup).length, transf: r.filter((x) => x.pairWith || x.pairEx).length, desmarcados: r.filter((x) => !x.checked).length };
   const P = [['todos', 'Todos'], ['dup', 'Duplicados'], ['transf', 'Transferências'], ['desmarcados', 'Desmarcados']];
   return `<div class="pills" role="group" aria-label="Filtrar">${P.filter(([id]) => id === 'todos' || cnt[id]).map(([id, t]) => `<button type="button" class="pill ${W.filtro === id ? 'on' : ''}" data-f="${id}" aria-pressed="${W.filtro === id}">${t} (${cnt[id]})</button>`).join('')}</div>`;
 }
@@ -441,8 +480,10 @@ export default {
         else if (t.name === 'aj-tipo') { if (t.value) lay.tipo = t.value; else delete lay.tipo; }
         else if (t.name === 'aj-valuedate') lay.useValueDate = t.checked;
         else if (t.name === 'aj-invert') lay.invert = t.checked;
+        else if (t.name === 'aj-dotdates') lay.dotDates = t.checked;
         else if (t.name === 'aj-lembrar') { aj.lembrar = t.checked; return; }
         if (t.matches('[data-aj-role]')) { const vd = body.querySelector('[name=aj-valuedate]'); if (vd) vd.disabled = !lay.cols.some((c) => c.role === 'dateValue'); if (vd?.disabled) { vd.checked = false; lay.useValueDate = false; } }
+        if (lay.vazio) return;
         return ajRefresh();
       }
       if (t.closest('#map-form')) {
@@ -466,6 +507,7 @@ export default {
         const g = W.sess.groups[Number(card.dataset.g)];
         if (t.name === 'g-choice') { g.choice = t.value; g.ajusteInicial = 0; refresh(W.sess); card.replaceWith(Object.assign(document.createElement('div'), { innerHTML: groupCard(g) }).firstElementChild); }
         else if (t.name === 'g-tipo') g.novo.tipo = t.value;
+        else if (t.name === 'g-cartao') g.guardarCartao = t.checked;
         return;
       }
       const rowDiv = t.closest('.irow');
@@ -495,6 +537,11 @@ export default {
       if (c('[data-ajustar]')) return enterAjuste(false);
       if (c('[data-ia]')) return runAI();
       if (c('[data-ia-off]')) { W.src.useAi = false; W.src.excluded = new Set(); W.sess = buildSession(W.src); return paint(); }
+      if (c('[data-aj-try]')) {
+        const lay = W.aj.layout, nl = defaultLayout(W.src.lines, null, { dotDates: !!lay.dotDates, dateFmt: lay.dateFmt, invert: !!lay.invert });
+        if (nl) { if (lay.tipo) nl.tipo = lay.tipo; W.aj.layout = nl; W.aj.res = parseVisual(W.src, { layout: nl }); W.aj.tentou = !W.aj.res.rows.length; } else W.aj.tentou = true;
+        return paint();
+      }
       if (c('[data-ajuste-back]')) { if (W.sess) return go('contas'); W = null; return paint(); }
       if (c('[data-aj-next]')) {
         const b = c('[data-aj-next]'); b.disabled = true;
@@ -547,7 +594,8 @@ export default {
       if (c('[data-more]')) { W.limit += PAGE; return redrawList(); }
       const all = c('[data-all]'); if (all) { const on = all.dataset.all === '1'; for (const r of filteredRows()) { r.checked = on; r.touched = true; } redrawList(); return upd(); }
       const row = c('.irow'); const r = row && W.sess.rows[Number(row.dataset.r)];
-      if (r && c('[data-flip]')) { r.valor = -r.valor; r.flipped = true; r.semSinal = false; r.touched = true; suggest(r); if (r.pairWith) { setPair(r, false); } refresh2(); return; }
+      if (r && c('[data-flip]')) { r.valor = -r.valor; r.flipped = true; r.semSinal = false; r.touched = true; suggest(r); if (r.pairWith) { setPair(r, false); } if (r.pairEx) r.xferEx = false; refresh2(); return; }
+      if (r && c('[data-xfer]') && r.pairEx && !r.pairWith) { setPair(r, !r.xferEx); redrawRow(r, '[data-xfer]'); return upd(); }
       if (r && c('[data-xfer]')) { setPair(r, !r.xfer); if (r.xfer) { r.checked = r.pairWith.checked = !(r.dup || r.pairWith.dup); } redrawRow(r, '[data-xfer]'); redrawRow(r.pairWith); return upd(); }
       if (c('[data-commit]')) {
         const b = c('[data-commit]'); b.disabled = true;

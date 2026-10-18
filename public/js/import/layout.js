@@ -37,12 +37,15 @@ export function linesFromItems(items, page, pw, ph) {
 }
 
 // ---------- preparação das linhas ----------
-export function prepare(lines) {
+// opts.dotDates: tratar «17.08» como data dd.mm mesmo em linhas com poucas células (opção do ajuste manual). Sem opts, mantém a última leitura.
+export function prepare(lines, opts = {}) {
   let pw = 0;
   for (const L of lines) { if (L.pw) pw = Math.max(pw, L.pw); for (const c of L.cells || []) pw = Math.max(pw, c.x2 || 0); }
   lines.forEach((L, i) => {
+    if (opts.dotDates !== undefined && L._a && !!L._dd !== !!opts.dotDates) L._a = null;
     if (!L._a) {
-      L._a = atomize(L); L.i = i;
+      L._dd = !!opts.dotDates;
+      L._a = atomize(L, { dotDates: !!opts.dotDates }); L.i = i;
       const a = L._a;
       L.isRow = a.length >= 2 && a[0].t === 'date' && a.some((x) => x.t === 'amt');
       L.txt = a.filter((x) => x.t === 'txt').map((x) => x.s).join(' ');
@@ -191,6 +194,8 @@ function matchCols(hcols, clusters) {
 }
 
 // ---------- secções (tabelas) ----------
+// Títulos de blocos que NÃO são movimentos (terminam a tabela em curso): detalhe dos pagamentos, informações de pagamento, mensagens, avisos legais
+const STOP_RE = /^(detalhe d[aeo]s? pagamentos?|informa[çc][õo]es? de pagamento|mensagens?\s*$|informa[çc][õo]es? (importantes?|legais)|condi[çc][õo]es (gerais|de utiliza)|payment (details|information)|important information|legal (information|notice)|aviso legal)/i;
 // Percorre as linhas e devolve as tabelas encontradas: { hdr, items, opening, final, disp, pre, closed }
 export function scanSections(lines, { hdrAt, noise, region = null, implicit = false }) {
   const secs = []; let cur = null, pre = [], pendOpen = null;
@@ -206,6 +211,7 @@ export function scanSections(lines, { hdrAt, noise, region = null, implicit = fa
       else { if (cur) cur.closed = true; newSec(h); }
       pre = []; i = h.i1; continue;
     }
+    if (STOP_RE.test(L.text.trim()) && !L.isRow) { if (cur) cur.closed = true; pre = []; continue; } // fim da tabela de movimentos (pagamentos, mensagens, avisos…)
     const bl = balanceLine(L);
     if (bl) {
       const open = cur && !cur.closed;
@@ -307,18 +313,21 @@ export function buildRaw(sec, cols, ctx = {}) {
         if (c && c.role === 'dateValue') tokVal ||= d.tok; else tokMov ||= d.tok;
       }
       tokMov ||= tokVal;
-      let deb = null, cre = null, amt = null, saldo = null, amtS = null;
+      let deb = null, cre = null, amt = null, saldo = null, amtS = null, orig = null;
       for (const a of A.filter((x) => x.t === 'amt')) {
         const c = nearestNum(a, cols.nums); if (!c) continue;
         const info = amtInfo(a.s); if (Number.isNaN(info.v)) continue;
+        if (c.role === 'ignore') { orig ||= a.s; continue; } // valor na moeda original («100,00EUR», «,30EUR»): informativo
         if (c.role === 'debit') deb = (deb || 0) + Math.abs(info.v);
         else if (c.role === 'credit') cre = (cre || 0) + Math.abs(info.v);
         else if (c.role === 'amount') { if (!amt) { amt = info; amtS = a.s; } }
         else if (c.role === 'balance') saldo = info.v;
       }
-      const desc = A.filter((a) => a.t === 'txt' && (a.x + a.x2) / 2 < numLeft - 1).map((a) => a.s).join(' ').replace(/\s+/g, ' ').trim();
+      let desc = A.filter((a) => a.t === 'txt' && (a.x + a.x2) / 2 < numLeft - 1).map((a) => a.s).join(' ').replace(/\s+/g, ' ').trim();
+      let pais = null;
+      if (orig) { const mp = desc.match(/\s([A-Z]{3})$/); if (mp) { pais = mp[1]; desc = desc.slice(0, -4).trim(); } } // código do país antes do valor original
       if (deb == null && cre == null && !amt) { if (saldo != null && !desc) continue; ignoradas++; last = null; continue; }
-      last = { tokMov, tokVal, desc, deb, cre, amt, saldo, page: L.page, y: L.y, h: L.h };
+      last = { tokMov, tokVal, desc, deb, cre, amt, saldo, orig, pais, page: L.page, y: L.y, h: L.h };
       raw.push(last); lastRowLine = L;
     } else if (it.k === 'text' && last && cont < 4 && L.page === last.page) {
       const A = L._a, t0 = A.find((a) => a.t === 'txt');
@@ -343,7 +352,7 @@ export function buildRaw(sec, cols, ctx = {}) {
 const addDays = (iso, n) => { const d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
 export function makeYearOf({ period = null, yearHint = null, months = [], today = new Date() } = {}) {
   if (period) {
-    const ys = [...new Set([+period.ini.slice(0, 4), +period.fim.slice(0, 4)])];
+    const ys = [...new Set([+period.ini.slice(0, 4) - 1, +period.ini.slice(0, 4), +period.fim.slice(0, 4)])]; // inclui o ano anterior: movimentos de dezembro num extrato que começa em janeiro
     return (m, d) => {
       let best = null, bd = Infinity;
       for (const y of ys) {
@@ -383,7 +392,8 @@ export function finalizeRows(raw, { order = 'dmy', yearOf, tipo = 'ordem', openi
     } else continue;
     if (invert) valor = -valor;
     if (valor === 0) continue;
-    rows.push({ data, desc: r.desc, valor, saldo: r.saldo, contaKey: '', contaLabel: '', semSinal: !certo, pagina: r.page, herdada: r.herdada || undefined, _tok: tok });
+    const mo = r.orig && (r.orig.match(/(USD|GBP|CHF|JPY|BRL|\$|£)\s*$|^\s*(USD|GBP|CHF|JPY|BRL|\$|£)/i) || [])[0];
+    rows.push({ data, desc: mo ? `${r.desc} (${r.orig.replace(/\s+/g, ' ').trim()})` : r.desc, valor, saldo: r.saldo, contaKey: '', contaLabel: '', semSinal: !certo, pagina: r.page, herdada: r.herdada || undefined, orig: r.orig || undefined, pais: r.pais || undefined, _tok: tok });
   }
   void decimal; void opening;
   return { rows, dropped, anyNeg, hasBal };

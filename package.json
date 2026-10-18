@@ -10,9 +10,10 @@
     "serve": "node scripts/serve.mjs dist 8080",
     "start": "npm run build && npm run serve",
     "serve:dev": "node scripts/serve.mjs public 8081",
-    "test": "node tests/e2e.mjs && node tests/import.e2e.mjs && node tests/generic.e2e.mjs",
+    "test": "node tests/e2e.mjs && node tests/import.e2e.mjs && node tests/generic.e2e.mjs && node tests/card.e2e.mjs",
     "test:import": "node tests/import.e2e.mjs",
     "test:generic": "node tests/generic.e2e.mjs",
+    "test:card": "node tests/card.e2e.mjs",
     "fixtures": "node tests/fixtures/generate.mjs"
   },
   "type": "module",

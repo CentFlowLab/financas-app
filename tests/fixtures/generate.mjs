@@ -214,6 +214,8 @@ const expected = {};
 {
   const { generatePdfFixtures } = await import('./generate-pdf.mjs');
   expected.gen = await generatePdfFixtures();
+  const { generateCardFixtures } = await import('./generate-card.mjs');
+  expected.card = await generateCardFixtures();
 }
 out('expected.json', JSON.stringify(expected, null, 1) + '\n');
 console.log('fixtures geradas:', Object.keys(expected).join(', '));

@@ -59,7 +59,7 @@ export function parseCSV(text, delim = ';') {
 }
 
 // ---------- números (formato português e internacional) ----------
-const CLEAN_CUR = /[€$£]|\b(?:EUR|USD|GBP)\b/gi;
+const CLEAN_CUR = /[€$£]|(?<![A-Za-z])(?:EURO|EUR|USD|GBP|CHF)(?![A-Za-z])/gi;
 export function detectDecimalStyle(samples) {
   let comma = 0, dot = 0;
   for (const v of samples) {

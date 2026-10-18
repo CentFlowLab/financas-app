@@ -70,7 +70,7 @@ export function datesIn(text, order = 'dmy') {
 
 // ---------- valores ----------
 const CUR = '(?:€|EUR|EURO|USD|GBP|\\$|£)';
-const AMT_BODY = `[-+−–]?\\(?${CUR}?\\s?[-+−–]?\\d+(?:[.,\\u00a0\\u202f' ]\\d{3})*[.,]\\d{2}\\)?[-+−–]?(?:\\s?${CUR})?(?:\\s?(?:CR|DB|DR|C|D))?`;
+const AMT_BODY = `[-+−–]?\\(?${CUR}?\\s?[-+−–]?(?:\\d+(?:[.,\\u00a0\\u202f' ]\\d{3})*)?[.,]\\d{2}\\)?[-+−–]?(?:\\s?${CUR})?(?:\\s?(?:CR|DB|DR|C|D))?`;
 export const AMT_FULL = new RegExp(`^${AMT_BODY}$`, 'i');
 const AMT_END = new RegExp(`(?:^|\\s)(${AMT_BODY})\\s*$`, 'i');
 const CUR_ONLY = new RegExp(`^${CUR}$`, 'i');
@@ -84,8 +84,9 @@ export function amtInfo(s) {
 }
 
 // ---------- linha -> átomos ----------
+const DDMM_DOT = /^(0?[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])$/;
 // atom: { t: 'date'|'amt'|'txt'|'cur', s, x, x2, tok? }
-export function atomize(line) {
+export function atomize(line, { dotDates = false } = {}) {
   const cells = (line.cells && line.cells.length ? line.cells : [{ s: line.text || '', x: 0, x2: 100 }]).filter((c) => String(c.s).trim() !== '');
   const out = [];
   const nCells = cells.length;
@@ -93,9 +94,14 @@ export function atomize(line) {
     const s = String(c.s).replace(/\u00a0/g, ' ').trim(); if (!s) return;
     const W = Math.max(0.1, c.x2 - c.x), pos = (i) => c.x + (i / s.length) * W;
     if (CUR_ONLY.test(s)) { out.push({ t: 'cur', s, x: c.x, x2: c.x2 }); return; }
+    const nDates = () => out.filter((a) => a.t === 'date').length;
+    // «17.08» sozinho numa das 2 primeiras células, numa linha com mais células e um valor: é data dd.mm (e não o valor 17,08)
+    if (ci <= 1 && nDates() < 2 && DDMM_DOT.test(s) && nCells >= (dotDates ? 2 : 3) && (ci === 0 || out[out.length - 1]?.t === 'date') && cells.some((o, j) => j !== ci && isAmt(String(o.s).trim()) && !DDMM_DOT.test(String(o.s).trim()))) {
+      const d = dateAt(s, { dotShort: true });
+      if (d) { out.push({ t: 'date', s, tok: d, x: c.x, x2: c.x2 }); return; }
+    }
     if (isAmt(s)) { out.push({ t: 'amt', s, x: c.x, x2: c.x2 }); return; }
     let rest = s, off = 0;
-    const nDates = () => out.filter((a) => a.t === 'date').length;
     if (ci <= 1 && nDates() < 2) {
       const dot = nCells >= 3 || s.length > 6;
       let d = dateAt(rest, { dotShort: dot });

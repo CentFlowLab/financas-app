@@ -43,7 +43,7 @@ export default {
     const arch = S.accounts.filter((a) => a.arquivada);
     const card = (a) => {
       const b = accountBalance(a); const t = accountTypeInfo(a.tipo);
-      const disp = a.tipo === 'cartao' && a.limite ? `<small class="muted">Disponível ${eur(a.limite + b)} de ${eur(a.limite)}</small>` : '';
+      const disp = a.tipo === 'cartao' && a.limite ? `<small class="muted" data-disp>Disponível ${eur(a.limite + b)} de ${eur(a.limite)}${a.tan != null ? ` · TAN ${String(a.tan).replace('.', ',')}%` : ''}</small>` : '';
       return `<div class="acc-card"><button class="acc-main" data-edit="${a.id}" aria-label="Editar ${esc(a.nome)}"><span class="ico-round big">${t.i}</span><span class="grow"><span class="t">${esc(a.nome)}</span><small>${t.t}</small>${disp}</span><b class="${b < 0 ? 'neg' : ''}" data-bal="${esc(a.nome)}">${eur(b)}</b></button><a class="link small" href="#/movimentos?conta=${a.id}&mes=">Ver movimentos</a></div>`;
     };
     return `<div class="page-head"><h1 class="page-title">Contas</h1><div class="btn-row"><a class="btn ghost small" id="btn-importar" href="#/importar?novo=1">${ICONS.importar} Importar extrato</a><button class="btn ghost small" data-transfer>🔁 Transferir</button><button class="btn primary small" data-new>${ICONS.plus} Nova conta</button></div></div>

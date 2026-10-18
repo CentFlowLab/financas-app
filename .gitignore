@@ -10,6 +10,9 @@ playwright-report/
 *real*.pdf
 extrato-*-real*
 extrato.txt
+extrato*.txt
+extrato*.pdf
+*real*.txt
 /uploads/
 /scratch/
 *.real.*

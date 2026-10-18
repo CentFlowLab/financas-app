@@ -1,12 +1,14 @@
 // Importar extratos — categorização automática (regras em português + aprendizagem a partir das correções do utilizador)
 import { S } from '../db.js';
 import { norm, uid } from '../util.js';
-import { FALLBACK_IN, FALLBACK_OUT, CAT_FUEL, CAT_DEBT } from '../defaults.js';
+import { FALLBACK_IN, FALLBACK_OUT, CAT_FUEL, CAT_DEBT, CAT_FEES, CAT_TRANSF, CAT_TRANSF_IN, DEFAULT_CATEGORIES } from '../defaults.js';
 
 const NOS = /(?<!\b(?:para|de|a|em|por|entre|connosco|ver|dar) )(?<![a-z0-9])nos(?![a-z0-9])/;
 // [categoria, [palavras-chave]] — texto normalizado (sem acentos, minúsculas); "*" = qualquer terminação; ordem = prioridade
 const OUT = [
-  ['cat-restaurantes', ['uber eats', 'ubereats', 'bolt food', 'glovo', 'mcdonald*', 'burger king', 'kfc', 'telepizza', 'pizza hut', 'starbucks', 'restaurante*', 'pastelaria*', 'cafe*', 'cafetaria', 'snack bar', 'tasca', 'churrasqueira', 'padaria*', 'sushi', 'take away', 'takeaway', 'vitaminas', 'five guys', 'dominos']],
+  [CAT_FEES, ['comissao no*', 'comissao sobre*', 'comissao de utilizacao', 'comissao de cartao', 'comissoes de cartao', 'comissao de levantamento', 'juros sobre*', 'juros de mora', 'juros remuneratorios', 'juros']], // «Comissão» isolada continua em «Impostos e taxas»
+  [CAT_TRANSF, ['trfi para*', 'trfi', 'trf mb way', 'trf imediata para', 'transferencia mb way', 'transferencia imediata para', 'mbway para']],
+  ['cat-restaurantes', ['hamburgueria*', 'uber eats', 'ubereats', 'bolt food', 'glovo', 'mcdonald*', 'burger king', 'kfc', 'telepizza', 'pizza hut', 'starbucks', 'restaurante*', 'pastelaria*', 'cafe*', 'cafetaria', 'snack bar', 'tasca', 'churrasqueira', 'padaria*', 'sushi', 'take away', 'takeaway', 'vitaminas', 'five guys', 'dominos']],
   ['cat-contas-casa', ['galp energia', 'galp power', 'galp luz', 'edp comercial', 'edp', 'endesa', 'iberdrola', 'goldenergy', 'ycell', 'epal', 'smas', 'aguas de*', 'eletricidade', 'gas natural', 'agua e saneamento']],
   [CAT_FUEL, ['galp', 'repsol', 'bp', 'prio', 'cepsa', 'moeve', 'shell', 'combustivel*', 'gasoleo', 'gasolina', 'posto de abastecimento', 'posto']],
   ['cat-transportes', ['via verde', 'viaverde', 'brisa', 'uber', 'bolt', 'cabify', 'free now', 'freenow', 'cp comboios', 'comboios de portugal', 'cp', 'metro*', 'carris', 'navegante', 'andante', 'transtejo', 'soflusa', 'tap', 'ryanair', 'easyjet', 'flixbus', 'emel', 'parque*', 'estacionamento', 'parking', 'taxi*', 'portagens*', 'oficina*', 'norauto', 'midas']],
@@ -16,13 +18,14 @@ const OUT = [
   ['cat-vestuario', ['zara', 'h&m', 'h m ', 'primark', 'decathlon', 'pull bear', 'bershka', 'stradivarius', 'mango', 'sport zone', 'sportzone', 'salsa', 'lefties', 'cortefiel', 'sapataria*', 'calcado', 'tezenis', 'bonprix', 'shein', 'zalando']],
   ['cat-casa', ['ikea', 'leroy merlin', 'aki', 'worten', 'conforama', 'jysk', 'maxmat', 'bricomarche', 'renda', 'condominio', 'ferragens', 'eletrodomesticos', 'el corte ingles', 'mudum', 'tiger']],
   ['cat-seguros', ['fidelidade', 'tranquilidade', 'ageas', 'allianz', 'mapfre', 'zurich', 'generali', 'seguro*', 'liberty', 'medis', 'multicare', 'una seguros']],
-  ['cat-impostos', ['autoridade tributaria', 'financas', 'portal das financas', 'iuc', 'imi', 'irs', 'irc', 'imposto*', 'seguranca social', 'tsu', 'comissao', 'comissoes', 'manutencao de conta', 'manutencao conta', 'taxa*', 'iva', 'selo', 'juros devedores', 'anuidade', 'custos de conta', 'portagem em atraso', 'coima*', 'multa*']],
+  ['cat-impostos', ['autoridade tributaria', 'financas', 'portal das financas', 'iuc', 'imi', 'irs', 'irc', 'imposto*', 'seguranca social', 'tsu', 'manutencao de conta', 'manutencao conta', 'taxa*', 'iva', 'selo', 'comissao', 'comissoes', 'juros devedores', 'anuidade', 'custos de conta', 'portagem em atraso', 'coima*', 'multa*']],
   ['cat-educacao', ['escola*', 'universidade*', 'propinas', 'colegio*', 'creche', 'infantario', 'udemy', 'coursera', 'faculdade', 'instituto*', 'explicacoes', 'ensino', 'mensalidade escolar', 'papelaria*']],
   [CAT_DEBT, ['prestacao*', 'credito habitacao', 'credito pessoal', 'emprestimo*', 'leasing', 'cofidis', 'cetelem', 'financiamento', 'amortizacao*', 'credito automovel', 'credito conso']],
   ['cat-prendas', ['prenda*', 'florista*', 'flores', 'presente']],
-  ['cat-supermercado', ['continente', 'pingo doce', 'lidl', 'aldi', 'minipreco', 'mini preco', 'auchan', 'intermarche', 'mercadona', 'e leclerc', 'leclerc', 'apolonia', 'spar', 'meu super', 'supermercado*', 'hipermercado*', 'mercearia*', 'talho', 'peixaria', 'frutaria', 'minimercado', 'amanhecer', 'recheio', 'makro', 'jumbo', 'froiz', 'celeiro']],
+  ['cat-supermercado', ['super', 'continente', 'pingo doce', 'lidl', 'aldi', 'minipreco', 'mini preco', 'auchan', 'intermarche', 'mercadona', 'e leclerc', 'leclerc', 'apolonia', 'spar', 'meu super', 'supermercado*', 'hipermercado*', 'mercearia*', 'talho', 'peixaria', 'frutaria', 'minimercado', 'amanhecer', 'recheio', 'makro', 'jumbo', 'froiz', 'celeiro']],
 ];
 const IN = [
+  [CAT_TRANSF_IN, ['trf imediata', 'trfi de*', 'transferencia imediata', 'transferencia mb way', 'trf mb way']],
   ['cat-salario', ['ordenado', 'salario*', 'vencimento*', 'remuneracao', 'remuneracoes', 'processamento de vencimento', 'proc vencimento', 'pagamento de ordenado', 'folha de pagamento']],
   ['cat-subsidios', ['subsidio*', 'sub ferias', 'sub natal', 'subs alimentacao', 'abono', 'rsi', 'pensao', 'reforma']],
   ['cat-reembolsos', ['reembolso*', 'estorno*', 'devolucao', 'devolucoes', 'cashback', 'anulacao', 'reversao', 'restituicao', 'reembolso irs']],
@@ -38,6 +41,12 @@ const BUILTIN_OUT = OUT.map(([c, ks]) => [c, ks.map((k) => ({ k, re: compile(k) 
 const BUILTIN_IN = IN.map(([c, ks]) => [c, ks.map((k) => ({ k, re: compile(k) }))]);
 
 const exists = (id) => S.categories.some((c) => c.id === id);
+// Categorias que as regras podem sugerir mas que bases de dados antigas não têm: acrescenta as que faltam (sem tocar nas existentes)
+export function ensureSuggestedCategories() {
+  let n = 0;
+  for (const id of [CAT_FEES, CAT_TRANSF, CAT_TRANSF_IN]) if (!exists(id)) { const d = DEFAULT_CATEGORIES.find((c) => c.id === id); if (d) { S.categories.push({ ...d, orcamento: null }); n++; } }
+  return n;
+}
 const pick = (id, tipo) => (exists(id) ? id : (tipo === 'entrada' ? FALLBACK_IN : FALLBACK_OUT));
 
 // Palavras sem valor para identificar um comerciante ("compra", "pagamento", cidades…)
