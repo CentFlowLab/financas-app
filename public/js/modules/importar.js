@@ -5,9 +5,10 @@ import { accountBalance } from '../model.js';
 import { ACCOUNT_TYPES, accountTypeInfo } from '../defaults.js';
 import { confirmBox, toast } from '../ui.js';
 import { ICONS } from '../icons.js';
-import { loadSource, prepare, buildSession, isTable, getParsed, refresh, summarize, reconcile, openingCheck, reconCauses, commit, persist, undoImport, setPair, suggest, tipoOf, FORMATOS, ACEITA } from '../import/engine.js';
+import { loadSource, prepare, buildSession, isTable, getParsed, refresh, applyManualLayout, parseVisual, interpretWithAI, aiAvailable, aiHost, listLayouts, forgetLayout, rememberPdfLayout, rememberTableLayout, mapChangedFromAuto, summarize, reconcile, openingCheck, reconCauses, commit, persist, undoImport, setPair, suggest, tipoOf, FORMATOS, ACEITA } from '../import/engine.js';
 import { applyMapping, autoMap, cellStr } from '../import/parse.js';
 import { sampleCSV } from '../import/sample.js';
+import { defaultLayout, previewLines } from '../import/pdfstatement.js';
 
 let W = null; // estado do assistente (persiste enquanto navega entre vistas)
 const PAGE = 150;
@@ -15,13 +16,14 @@ const persistAll = () => save('accounts', 'movements', 'imports');
 const colLetter = (i) => { let s = ''; i++; while (i > 0) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; };
 const sgn = (c) => (c > 0 ? '+' : c < 0 ? '−' : '') + eur(Math.abs(c));
 const fmtDT = (iso) => { const d = new Date(iso); const p = (n) => String(n).padStart(2, '0'); return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`; };
-const STEPS = [['ficheiro', 'Ficheiro'], ['colunas', 'Colunas'], ['contas', 'Contas'], ['rever', 'Rever']];
+const STEPS = [['ficheiro', 'Ficheiro'], ['colunas', 'Colunas'], ['pdfajuste', 'Leitura'], ['contas', 'Contas'], ['rever', 'Rever']];
+const isVisual = (src) => src && (src.format === 'pdf' || src.format === 'img');
 
 const PRIVACY = '<p class="privacy" id="imp-privacy">🔒 <span><b>Privacidade:</b> tudo é processado localmente, no seu navegador. O ficheiro e os movimentos não são enviados para nenhum servidor.</span></p>';
 
 function stepper(step) {
   const table = W?.src && isTable(W.src);
-  const list = STEPS.filter(([id]) => table || id !== 'colunas');
+  const list = STEPS.filter(([id]) => id === 'colunas' ? table : id === 'pdfajuste' ? !!W?.ajVisited : true);
   const idx = list.findIndex(([id]) => id === step);
   return `<ol class="steps" aria-label="Passos da importação">${list.map(([id, t], i) => `<li class="${i < idx ? 'done' : i === idx ? 'on' : ''}" ${i === idx ? 'aria-current="step"' : ''}><b>${i + 1}</b><span>${t}</span></li>`).join('')}</ol>`;
 }
@@ -39,16 +41,21 @@ function rulesHtml() {
   if (!rules.length) return '';
   return `<details class="card" id="imp-rules"><summary>Categorias aprendidas (${rules.length})</summary><p class="muted small">Quando corrige uma categoria na revisão, a aplicação lembra-se para as próximas importações.</p>${rules.map((r) => { const c = S.categories.find((x) => x.id === r.categoriaId); return `<div class="row"><span class="grow"><span class="t">${esc(r.chave)}</span><small>${r.tipo === 'entrada' ? 'Entrada' : 'Saída'} → ${esc(c ? c.icone + ' ' + c.nome : '?')}</small></span><button type="button" class="icon-btn" data-forget="${r.id}" aria-label="Esquecer «${esc(r.chave)}»">✕</button></div>`; }).join('')}</details>`;
 }
+function layoutsHtml() {
+  const ls = listLayouts();
+  if (!ls.length) return '';
+  return `<details class="card" id="imp-layouts"><summary>Layouts de leitura guardados (${ls.length})</summary><p class="muted small">Quando ajusta as colunas de um extrato, a aplicação lembra-se do layout para os próximos extratos do mesmo banco. Pode esquecê-los aqui.</p>${ls.map((l) => `<div class="row"><span class="grow"><span class="t">${esc(l.nome)}</span><small>${l.kind === 'tabela' ? 'Colunas de CSV/Excel' : 'Colunas de PDF/imagem'}${l.quando ? ' · ' + esc(l.quando) : ''}</small></span><button type="button" class="icon-btn" data-forget-layout="${esc(l.id)}" aria-label="Esquecer o layout «${esc(l.nome)}»">✕</button></div>`).join('')}</details>`;
+}
 function stepFicheiro() {
   return `<section class="card imp-drop" id="imp-drop">
     <h2>Importe o extrato do seu banco</h2>
     <p>Descarregue o extrato no homebanking e escolha o ficheiro aqui. A aplicação cria as contas que faltarem e acrescenta os movimentos — antes de guardar, verá tudo numa revisão.</p>
     <div class="btn-row imp-actions"><label class="btn primary big" id="imp-pick">${ICONS.importar} Escolher ficheiro<input type="file" id="imp-file" accept="${ACEITA}" hidden></label>
     <button type="button" class="btn ghost big" data-sample>🧪 Experimentar com extrato de exemplo</button></div>
-    <p class="small muted">Formatos: <b>CSV</b> (; ou ,), <b>Excel</b> (.xlsx, .xls), <b>OFX</b>, <b>QIF</b> e <b>PDF</b> de texto (<span class="chip warn">melhor esforço</span>). Também pode largar o ficheiro nesta caixa.</p>
+    <p class="small muted">Formatos: <b>CSV</b> (; ou ,), <b>Excel</b> (.xlsx, .xls), <b>OFX</b>, <b>QIF</b>, <b>PDF</b> (de texto ou digitalizado) e <b>fotos/capturas</b> (PNG, JPG) — PDF e imagens são lidos em <span class="chip warn">melhor esforço</span> (as imagens por OCR). Também pode largar o ficheiro nesta caixa.</p>
     ${PRIVACY}
     <div id="imp-msg" role="status" aria-live="polite"></div>
-  </section>${historyHtml()}${rulesHtml()}`;
+  </section>${historyHtml()}${rulesHtml()}${layoutsHtml()}`;
 }
 
 // ---------- passo 2: colunas ----------
@@ -76,6 +83,7 @@ function stepColunas() {
   return `<section class="card">
     <h2>Confirme as colunas</h2>
     <p class="small muted">📄 <b>${esc(src.name)}</b> · ${FORMATOS[src.format]}${src.encoding ? ` · ${esc(src.encoding)}` : ''}${src.delim ? ` · separador «${src.delim === '\t' ? 'tab' : esc(src.delim)}»` : ''}. ${bank ? `Parece um extrato <b>${esc(bank.nome)}</b> (reconhecimento aproximado). ` : ''}Detetei as colunas automaticamente; se algo estiver errado, ajuste abaixo — a pré-visualização atualiza logo.</p>
+    ${src.savedTable ? `<div class="hint ok-hint" id="imp-saved">♻️ Apliquei o mapeamento de colunas guardado para ficheiros iguais (<b>${esc(src.savedTable.nome)}</b>). <button type="button" class="link btn-link" data-no-saved>Usar a deteção automática</button></div>` : ''}
     ${previewHtml()}
     <form class="map-form" id="map-form" novalidate>
       <div class="grid2">
@@ -103,10 +111,62 @@ function stepColunas() {
         <label class="check"><input type="checkbox" name="m-inverter" ${m.inverter ? 'checked' : ''}> Inverter sinais (os débitos aparecem como valores positivos)</label>
       </details>
     </form>
+    <label class="check"><input type="checkbox" id="imp-lembrar-tab" ${W.lembrarTabela === false ? '' : 'checked'}> Lembrar estas colunas para ficheiros iguais (mesmo banco/exportação)</label>
     <details class="more-opts"><summary>Ver o ficheiro original (primeiras linhas)</summary><div class="tbl-wrap"><table class="tbl raw" aria-label="Linhas do ficheiro">${rows.slice(0, 14).map((r, i) => `<tr class="${i === m.headerRow ? 'hdr' : ''}"><th>${i + 1}</th>${r.slice(0, 10).map((c) => `<td>${esc(cellStr(c).slice(0, 30))}</td>`).join('')}</tr>`).join('')}</table></div></details>
     ${PRIVACY}
   </section>
   <div class="imp-nav sticky"><button type="button" class="btn ghost" data-restart>Cancelar</button><span class="grow"></span><button type="button" class="btn primary" data-next ${applyMapping(rows, m).rows.length ? '' : 'disabled'}>Continuar</button></div>`;
+}
+
+// ---------- passo «Ajustar leitura do PDF» ----------
+const ROLES = [['ignore', '— ignorar —'], ['date', 'Data'], ['dateValue', 'Data valor'], ['desc', 'Descrição'], ['debit', 'Débito (saídas)'], ['credit', 'Crédito (entradas)'], ['amount', 'Valor (±)'], ['balance', 'Saldo']];
+function initAjuste() {
+  const src = W.src;
+  const layout = src.manual ? JSON.parse(JSON.stringify(src.manual)) : defaultLayout(src.lines, src.parsed);
+  if (layout) { layout.skip ||= []; layout.dateFmt ||= 'auto'; }
+  return { layout, lembrar: true, res: layout ? parseVisual(src, { layout }) : null };
+}
+function ajResultHtml(res) {
+  if (!res) return '';
+  if (!res.rows.length) return '<p class="hint warn" role="alert">Com esta leitura ainda não há movimentos. Confirme as colunas <b>Data</b> e <b>Valor</b> (ou Débito/Crédito) e o formato da data.</p>';
+  const ent = res.rows.filter((r) => r.valor > 0).reduce((a, r) => a + r.valor, 0), sai = res.rows.filter((r) => r.valor < 0).reduce((a, r) => a + r.valor, 0);
+  const nivel = { alta: 'confiança alta', media: 'confiança média', baixa: 'confiança baixa' }[res.confianca.nivel];
+  const sample = res.rows.slice(0, 5);
+  const unc = res.rows.filter((r) => r.semSinal).length;
+  return `<p id="aj-count"><b>${res.rows.length} movimento${res.rows.length === 1 ? '' : 's'}</b> · entradas <b class="pos">${eur(ent)}</b> · saídas <b class="neg">${eur(Math.abs(sai))}</b> · ${nivel}${unc ? ` · <span class="chip warn">${unc} com sinal incerto</span>` : ''}</p>
+    <div class="tbl-wrap"><table class="tbl" aria-label="Primeiros movimentos com esta leitura"><thead><tr><th>Data</th><th>Descrição</th><th class="r">Valor</th><th class="r">Saldo</th></tr></thead><tbody>${sample.map((r) => `<tr><td>${fmtDate(r.data)}</td><td>${esc(r.desc)}</td><td class="r ${r.valor < 0 ? 'neg' : 'pos'}">${sgn(r.valor)}</td><td class="r">${r.saldo == null ? '—' : eur(r.saldo)}</td></tr>`).join('')}</tbody></table></div>`;
+}
+function stepAjuste() {
+  const src = W.src, aj = W.aj, lay = aj.layout;
+  const motivo = W.ajusteMotivo || '';
+  const head = `<section class="card" id="imp-ajuste"><h2>Ajustar leitura do PDF</h2>
+    <p class="small muted">📄 <b>${esc(src.name)}</b>${src.ocr ? ' · lido por OCR' : ''}. ${motivo ? `<b>${esc(motivo)}</b> ` : ''}Indique o que é cada coluna e os formatos; a aplicação lembra-se do layout para os próximos extratos deste banco. <span class="muted">Na leitura manual todas as linhas são tratadas como uma única tabela (uma conta).</span></p>`;
+  if (!lay) {
+    return `${head}<p class="hint warn" role="alert">Não encontrei linhas com <b>data</b> e <b>valor</b> neste ficheiro, por isso não há colunas para ajustar.${src.ocr ? ' Uma foto mais nítida e direita (ou o PDF original) costuma resolver.' : ' Se o extrato for uma imagem dentro do PDF, tente exportá-lo em CSV, Excel ou OFX.'}</p>
+    <div id="imp-ai-msg" role="alert">${W.aiMsg ? `<p class="hint warn">${esc(W.aiMsg)}</p>` : ''}</div>
+    <div class="btn-row">${aiAvailable() ? '<button type="button" class="btn" data-ia>✨ Interpretar com IA</button>' : ''}<button type="button" class="btn ghost" data-restart>Escolher outro ficheiro</button></div></section>`;
+  }
+  const o = (v, t, cur) => `<option value="${v}" ${String(cur) === String(v) ? 'selected' : ''}>${t}</option>`;
+  const cols = lay.cols, skip = new Set(lay.skip || []);
+  const pv = previewLines(src.lines, lay, 70);
+  const hasVal = cols.some((c) => c.role === 'dateValue');
+  return `${head}
+    <div class="aj-opts grid2">
+      <label class="fld"><span>Formato das datas</span><select name="aj-datefmt">${o('auto', 'Automático', lay.dateFmt)}${o('dmy', 'dia-mês-ano', lay.dateFmt)}${o('mdy', 'mês-dia-ano', lay.dateFmt)}</select></label>
+      <label class="fld"><span>Tipo de conta (ajuda a deduzir entradas/saídas)</span><select name="aj-tipo">${o('', 'Automático', lay.tipo || '')}${o('ordem', 'Conta à ordem / poupança', lay.tipo || '')}${o('cartao', 'Cartão de crédito', lay.tipo || '')}</select></label>
+    </div>
+    <label class="check"><input type="checkbox" name="aj-valuedate" ${lay.useValueDate ? 'checked' : ''} ${hasVal ? '' : 'disabled'}> Usar a «Data valor» em vez da data do movimento</label>
+    <label class="check"><input type="checkbox" name="aj-invert" ${lay.invert ? 'checked' : ''}> Inverter sinais (entradas ↔ saídas)</label>
+    <div id="aj-body"><p class="small"><b>Colunas lidas</b> — escolha o papel de cada uma no cabeçalho da tabela; marque «ignorar» nas linhas que não são movimentos (títulos, rodapés, avisos):</p>
+    <div class="tbl-wrap aj-wrap"><table class="tbl aj-tbl" id="aj-table" aria-label="Linhas lidas do documento"><thead><tr><th>Ignorar</th>${cols.map((c, j) => `<th><select data-aj-role="${j}" aria-label="Papel da coluna ${j + 1}">${ROLES.map(([v, t]) => o(v, t, c.role)).join('')}</select></th>`).join('')}</tr></thead>
+    <tbody>${pv.map((l) => l.cells ? `<tr class="${skip.has(l.sig) ? 'skip' : ''}" data-sig="${esc(l.sig)}"><td><input type="checkbox" data-aj-skip="${esc(l.sig)}" ${skip.has(l.sig) ? 'checked' : ''} aria-label="Ignorar esta linha"></td>${l.cells.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>` : `<tr class="txt ${skip.has(l.sig) ? 'skip' : ''}" data-sig="${esc(l.sig)}"><td><input type="checkbox" data-aj-skip="${esc(l.sig)}" ${skip.has(l.sig) ? 'checked' : ''} aria-label="Ignorar esta linha"></td><td colspan="${cols.length}">${esc(l.text)}</td></tr>`).join('')}</tbody></table></div>
+    <p class="small muted">Ignorar uma linha ignora todas as linhas iguais (os números contam como iguais) — útil para cabeçalhos e rodapés repetidos.</p></div>
+    <div id="aj-result" aria-live="polite"><p class="small muted">Com esta leitura:</p>${ajResultHtml(aj.res)}</div>
+    <div id="imp-ai-msg" role="alert">${W.aiMsg ? `<p class="hint warn">${esc(W.aiMsg)}</p>` : ''}</div>
+    <label class="check"><input type="checkbox" name="aj-lembrar" ${aj.lembrar ? 'checked' : ''}> Lembrar este layout para os próximos extratos deste banco</label>
+    ${aiAvailable() ? '<div class="btn-row"><button type="button" class="btn small" data-ia>✨ Interpretar com IA</button></div>' : ''}
+  </section>
+  <div class="imp-nav sticky"><button type="button" class="btn ghost" data-ajuste-back>${W.sess ? 'Voltar' : 'Cancelar'}</button><span class="grow"></span><button type="button" class="btn primary" data-aj-next ${aj.res?.rows.length ? '' : 'disabled'}>Continuar com esta leitura</button></div>`;
 }
 
 // ---------- passo 3: contas ----------
@@ -158,9 +218,28 @@ function groupCard(g) {
     ${reconText(g)}
   </section>`;
 }
+function detectHtml() {
+  const src = W.src; if (!isVisual(src) || !src.parsed) return '';
+  const full = src.useAi && src.aiParsed ? src.aiParsed : src.parsed, view = getParsed(src), cf = view.confianca || full.confianca;
+  const nMov = W.sess.rows.length, nAcc = W.sess.groups.length;
+  const secs = full.secoes.filter((x) => x.tipo === 'conta');
+  const how = src.useAi ? 'Interpretado por IA' : src.parsed.metodo === 'manual' ? 'Leitura ajustada por si' : src.parsed.metodo === 'guardado' ? 'Layout guardado aplicado' : src.ocr ? 'Texto lido por OCR' : src.parsed.metodo === 'heuristica' ? 'Sem cabeçalho de tabela: linhas com data e valor' : 'Tabela detetada pelo cabeçalho';
+  const nivel = { alta: 'confiança alta', media: 'confiança média', baixa: 'confiança baixa' }[cf.nivel];
+  const head = nMov ? `Detetei <b>${nMov} movimento${nMov === 1 ? '' : 's'}</b> de <b>${nAcc} conta${nAcc === 1 ? '' : 's'}</b>, <b>${nivel}</b>.` : 'Nenhum movimento selecionado.';
+  const motivos = (cf.motivos || []).filter((m) => !/^Não encontrei movimentos/.test(m));
+  return `<section class="card imp-detect" id="imp-detect" data-conf="${cf.nivel}">
+    <div class="card-h"><h2>🔎 O que detetei</h2><span class="chip ${cf.nivel === 'alta' ? 'ok' : 'warn'}">${nivel}</span></div>
+    <p id="imp-detected">${head}</p>
+    <p class="small muted">${esc(how)}${src.ocr ? ' — <b>melhor esforço</b>: reveja tudo' : ''}.${motivos.length ? ' ' + esc(motivos.join(' ')) : ''}</p>
+    ${secs.length > 1 ? `<div class="sec-list" id="imp-secs"><p class="small"><b>Este ficheiro tem ${secs.length} contas/secções com movimentos.</b> Escolha quais importar:</p>${secs.map((x) => `<label class="check"><input type="checkbox" data-sec="${esc(x.key)}" ${src.excluded?.has(x.key) ? '' : 'checked'}> <span>${esc(x.titulo)} <small class="muted">(${x.n} movimento${x.n === 1 ? '' : 's'})</small></span></label>`).join('')}</div>` : ''}
+    ${src.parsed.guardadoFalhou || src.guardadoFalhou ? '<p class="small hint warn">O layout guardado deste banco não funcionou neste extrato; usei a deteção automática.</p>' : ''}
+    <div class="btn-row imp-detect-actions"><button type="button" class="btn small" data-ajustar>🛠️ Ajustar leitura do PDF</button>${aiAvailable() ? '<button type="button" class="btn small" data-ia>✨ Interpretar com IA</button>' : ''}${src.useAi ? '<button type="button" class="btn small ghost" data-ia-off>Voltar à leitura automática</button>' : ''}<button type="button" class="btn small ghost" data-restart>Escolher outro ficheiro</button></div>
+    <div id="imp-ai-msg" role="alert">${W.aiMsg ? `<p class="hint warn">${esc(W.aiMsg)}</p>` : ''}</div>
+  </section>`;
+}
 function stepContas() {
   const n = W.sess.groups.length;
-  return `<section class="card tip"><p>${n > 1 ? `Este ficheiro tem <b>${n} contas</b>. ` : ''}Confirme onde guardar os movimentos. As contas novas são criadas todas de uma vez quando confirmar a importação.</p></section>
+  return `${detectHtml()}<section class="card tip"><p>${n > 1 ? `Este ficheiro tem <b>${n} contas</b>. ` : ''}Confirme onde guardar os movimentos. As contas novas são criadas todas de uma vez quando confirmar a importação.</p></section>
     ${W.sess.groups.map(groupCard).join('')}
     <div class="imp-nav sticky"><button type="button" class="btn ghost" data-back>Voltar</button><span class="grow"></span><button type="button" class="btn primary" data-next>Continuar</button></div>`;
 }
@@ -176,7 +255,7 @@ function rowHtml(r) {
   if (r.dup) chips.push(`<span class="chip warn" title="${esc(r.dupMotivo)}">⚠️ Possível duplicado</span>`);
   if (r.pairWith) chips.push(`<span class="chip ${xf ? 'ok' : ''}">🔁 ${xf ? `Transferência ${r.valor < 0 ? esc(accLabel(r.g)) + ' → ' + esc(accLabel(other.g)) : esc(accLabel(other.g)) + ' → ' + esc(accLabel(r.g))}` : 'Possível transferência'}</span>`);
   if (r.catFonte === 'aprendida' && !xf) chips.push('<span class="chip" title="Categoria aprendida com as suas correções">🧠 Aprendida</span>');
-  if (r.semSinal) chips.push('<span class="chip warn">Confirme entrada/saída</span>');
+  if (r.semSinal) chips.push('<span class="chip warn" title="Não consegui perceber se é entrada ou saída; use «É entrada / É saída» para corrigir">Sinal incerto</span>');
   if (multi) chips.push(`<span class="chip">${esc(accLabel(r.g))}</span>`);
   const ctl = xf ? '' : `<select data-cat aria-label="Categoria">${catOptions(tipo, r.cat)}</select>`;
   const flip = xf ? '' : `<button type="button" class="btn small ghost" data-flip aria-label="Trocar para ${tipo === 'entrada' ? 'saída' : 'entrada'}">⇄ ${tipo === 'entrada' ? 'É saída' : 'É entrada'}</button>`;
@@ -233,7 +312,7 @@ function stepRever() {
     const contas = s.parsed.secoes.filter((x) => x.tipo === 'conta'), cred = s.parsed.secoes.filter((x) => x.tipo === 'emprestimo');
     banners.push(`<div class="hint" id="imp-sections">📑 <b>Extrato consolidado</b>${s.parsed.periodo ? ` (${fmtDate(s.parsed.periodo.ini)} a ${fmtDate(s.parsed.periodo.fim)})` : ''}: importei só os movimentos de ${contas.map((x) => `<b>${esc(x.titulo)}</b> (${x.n})`).join(', ')}.${cred.length ? ` Os ${cred.length} crédito${cred.length === 1 ? '' : 's'} (${esc(cred.map((x) => x.titulo).join(', '))}) não são movimentos: ficam como sugestão de dívida, mais abaixo.` : ''} Avisos, resumos e rodapés foram ignorados.</div>`);
   }
-  if (s.bestEffort) banners.push(`<div class="hint warn" id="imp-besteffort"><b>PDF — melhor esforço.</b> As datas, descrições, valores e o sinal (entrada/saída) foram deduzidos do texto do PDF e podem estar errados. Reveja todas as linhas.<label class="check"><input type="checkbox" id="imp-revisto" ${s.revisto ? 'checked' : ''}> Revi os movimentos extraídos do PDF</label></div>`);
+  if (s.bestEffort) banners.push(`<div class="hint warn" id="imp-besteffort"><b>${s.parsed?.ia ? 'Interpretado por IA' : s.src.ocr ? 'Imagem (OCR)' : 'PDF'} — melhor esforço.</b> As datas, descrições, valores e o sinal (entrada/saída) foram deduzidos ${s.parsed?.ia ? 'pela IA a partir do texto do extrato' : s.src.ocr ? 'por reconhecimento ótico de texto (OCR)' : 'do texto do PDF'} e podem estar errados. Reveja todas as linhas.<label class="check"><input type="checkbox" id="imp-revisto" ${s.revisto ? 'checked' : ''}> Revi os movimentos extraídos${s.parsed?.ia ? ' pela IA' : s.src.ocr ? ' da imagem' : ' do PDF'}</label></div>`);
   for (const w of s.warnings.filter((w) => !/melhor esforço/.test(w))) banners.push(`<div class="hint warn">${esc(w)}</div>`);
   if (s.ignored.length) banners.push(`<p class="small muted">${s.ignored.length} linha${s.ignored.length === 1 ? '' : 's'} do ficheiro ignorada${s.ignored.length === 1 ? '' : 's'} (títulos, totais ou sem data/valor).</p>`);
   const sm = summarize(s);
@@ -272,6 +351,7 @@ export default {
       let inner = '';
       if (st === 'ficheiro') inner = stepFicheiro();
       else if (st === 'colunas') inner = stepper(st) + stepColunas();
+      else if (st === 'pdfajuste') inner = stepper(st) + stepAjuste();
       else if (st === 'contas') inner = stepper(st) + stepContas();
       else if (st === 'rever') inner = stepper(st) + stepRever();
       else inner = stepFeito();
@@ -279,15 +359,44 @@ export default {
       body.querySelectorAll('details.adv').forEach((d) => d.addEventListener('toggle', () => { if (W) W.advOpen = d.open; }));
     };
     const go = (st) => { W.step = st; paint(); window.scrollTo(0, 0); };
-    const goAfterColumns = () => { W.sess = buildSession(W.src); go('contas'); };
+    const goAfterColumns = async () => {
+      const lemb = body.querySelector('#imp-lembrar-tab'); W.lembrarTabela = lemb ? lemb.checked : true;
+      const remember = W.lembrarTabela && mapChangedFromAuto(W.src);
+      W.sess = buildSession(W.src); go('contas'); // antes de gravar: guardar definições redesenha a vista com o passo atual
+      if (remember) { try { await rememberTableLayout(W.src); } catch (e) { console.error(e); } }
+    };
+    const lowConf = (src) => !src.parsed.rows.length || src.parsed.confianca.nivel === 'baixa';
+    const motivoBaixa = (src) => (src.parsed.rows.length ? 'Não tenho confiança suficiente na leitura automática: ' + (src.parsed.confianca.motivos || []).join(' ') : 'Não consegui ler movimentos automaticamente neste ficheiro.');
+    const enterAjuste = (auto) => { W.aj = initAjuste(); W.ajVisited = true; W.ajusteMotivo = auto ? motivoBaixa(W.src) : ''; W.aiMsg = ''; go('pdfajuste'); };
+    const ajRefresh = () => {
+      const aj = W.aj; aj.res = parseVisual(W.src, { layout: aj.layout });
+      const r = body.querySelector('#aj-result'); if (r) r.innerHTML = `<p class="small muted">Com esta leitura:</p>${ajResultHtml(aj.res)}`;
+      const nx = body.querySelector('[data-aj-next]'); if (nx) nx.disabled = !aj.res.rows.length;
+    };
+    async function runAI() {
+      const src = W.src;
+      const ok = await confirmBox(`Interpretar com IA — PRIVACIDADE: o texto extraído de «${src.name}» (datas, descrições e valores dos movimentos; IBAN e números longos só com os 4 últimos dígitos) vai ser ENVIADO para ${aiHost()}, o serviço de IA configurado em Definições. Isto sai do seu dispositivo e fica sujeito à política desse serviço. Só continue se aceitar. O resultado será validado e passa pela mesma revisão.`, { okLabel: 'Enviar e interpretar' });
+      if (!ok) return;
+      W.aiMsg = '';
+      const box = body.querySelector('#imp-ai-msg'); if (box) box.innerHTML = '<p class="hint" id="imp-ai-busy">⏳ A interpretar com IA…</p>';
+      try {
+        await interpretWithAI(src);
+        W.sess = buildSession(src); W.ajVisited ||= false;
+        toast('Interpretação da IA recebida — reveja os movimentos', 'ok'); go('contas');
+      } catch (e) {
+        W.aiMsg = 'Não consegui interpretar com IA: ' + (e.message || 'erro desconhecido') + ' Pode continuar com a leitura automática ou ajustar as colunas.';
+        const b2 = body.querySelector('#imp-ai-msg'); if (b2) b2.innerHTML = `<p class="hint warn">${esc(W.aiMsg)}</p>`;
+      }
+    }
     const msg = (html, kind = '') => { const m = body.querySelector('#imp-msg'); if (m) m.innerHTML = html ? `<p class="hint ${kind}">${html}</p>` : ''; };
 
     async function handleFile(file) {
       msg('⏳ A ler o ficheiro…');
       try {
-        const src = await loadSource(file);
+        const src = await loadSource(file, { onProgress: (m) => msg('⏳ ' + esc(m)) });
         W = { step: 'ficheiro', src, sess: null, filtro: 'todos', limit: PAGE, resultado: null };
         if (isTable(src)) { go('colunas'); }
+        else if (isVisual(src) && lowConf(src)) { enterAjuste(true); }
         else { W.sess = buildSession(src); go('contas'); }
       } catch (e) {
         msg('❌ ' + esc(e.message || 'Não foi possível ler o ficheiro.'), 'warn');
@@ -319,6 +428,23 @@ export default {
     body.addEventListener('change', async (e) => {
       const t = e.target;
       if (t.id === 'imp-file') { const f = t.files[0]; t.value = ''; if (f) handleFile(f); return; }
+      if (t.matches('[data-sec]')) {
+        const src = W.src; src.excluded ||= new Set();
+        if (t.checked) src.excluded.delete(t.dataset.sec); else src.excluded.add(t.dataset.sec);
+        W.sess = buildSession(src); return paint();
+      }
+      if (t.closest('#imp-ajuste')) {
+        const aj = W.aj, lay = aj.layout;
+        if (t.matches('[data-aj-role]')) lay.cols[Number(t.dataset.ajRole)].role = t.value;
+        else if (t.matches('[data-aj-skip]')) { const sig = t.dataset.ajSkip, set = new Set(lay.skip); if (t.checked) set.add(sig); else set.delete(sig); lay.skip = [...set]; body.querySelectorAll('#aj-table tr[data-sig]').forEach((tr) => { if (tr.dataset.sig === sig) { tr.classList.toggle('skip', t.checked); const cb = tr.querySelector('[data-aj-skip]'); if (cb) cb.checked = t.checked; } }); }
+        else if (t.name === 'aj-datefmt') lay.dateFmt = t.value;
+        else if (t.name === 'aj-tipo') { if (t.value) lay.tipo = t.value; else delete lay.tipo; }
+        else if (t.name === 'aj-valuedate') lay.useValueDate = t.checked;
+        else if (t.name === 'aj-invert') lay.invert = t.checked;
+        else if (t.name === 'aj-lembrar') { aj.lembrar = t.checked; return; }
+        if (t.matches('[data-aj-role]')) { const vd = body.querySelector('[name=aj-valuedate]'); if (vd) vd.disabled = !lay.cols.some((c) => c.role === 'dateValue'); if (vd?.disabled) { vd.checked = false; lay.useValueDate = false; } }
+        return ajRefresh();
+      }
       if (t.closest('#map-form')) {
         const src = W.src, m = src.map, name = t.name;
         if (name.startsWith('o-')) {
@@ -366,8 +492,26 @@ export default {
       const c = (s) => e.target.closest(s);
       if (c('[data-sample]')) return loadSample();
       if (c('[data-restart]')) { W = null; return paint(); }
+      if (c('[data-ajustar]')) return enterAjuste(false);
+      if (c('[data-ia]')) return runAI();
+      if (c('[data-ia-off]')) { W.src.useAi = false; W.src.excluded = new Set(); W.sess = buildSession(W.src); return paint(); }
+      if (c('[data-ajuste-back]')) { if (W.sess) return go('contas'); W = null; return paint(); }
+      if (c('[data-aj-next]')) {
+        const b = c('[data-aj-next]'); b.disabled = true;
+        try {
+          const src = W.src, lay = W.aj.layout;
+          applyManualLayout(src, lay);
+          W.sess = buildSession(src); W.ajusteMotivo = ''; W.aiMsg = '';
+          go('contas'); // antes de gravar: guardar definições redesenha a vista com o passo atual
+          if (W.aj.lembrar) await rememberPdfLayout(src, lay);
+          return;
+        } catch (err) { toast(err.message || 'Não foi possível aplicar esta leitura.', 'err'); b.disabled = false; return; }
+      }
+      const fl = c('[data-forget-layout]');
+      if (fl) { await forgetLayout(fl.dataset.forgetLayout); return paint(); }
+      if (c('[data-no-saved]')) { W.src.semGuardado = true; try { await prepare(W.src, true); } catch (err) { toast(err.message, 'err'); return; } return paint(); }
       if (c('[data-back]')) {
-        if (W.step === 'contas') { if (isTable(W.src)) return go('colunas'); W = null; return paint(); }
+        if (W.step === 'contas') { if (isTable(W.src)) return go('colunas'); if (isVisual(W.src) && W.ajVisited) { W.aj = initAjuste(); return go('pdfajuste'); } W = null; return paint(); }
         if (W.step === 'rever') return go('contas');
       }
       if (c('[data-next]')) {

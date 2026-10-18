@@ -304,3 +304,10 @@ input[aria-invalid=true]{border-color:var(--neg)}
 .imp-done .privacy{text-align:left}
 .new-acc{margin-top:4px}
 [hidden]{display:none!important}
+
+/* importação: deteção, ajuste de leitura do PDF */
+.imp-detect .card-h{margin-bottom:4px}.imp-detect-actions{margin-top:8px}.sec-list{margin:8px 0}.sec-list .check{margin:6px 0}
+.ok-hint{background:color-mix(in srgb,var(--pos) 18%,transparent)}
+.aj-wrap{max-height:420px;overflow:auto}.aj-tbl th select{min-width:112px;max-width:160px;font-size:.78rem}.aj-tbl td{font-size:.78rem;white-space:nowrap}
+.aj-tbl tr.txt td{color:var(--muted);font-style:italic;white-space:normal}.aj-tbl tr.skip td{opacity:.4;text-decoration:line-through}
+.aj-opts{margin:8px 0}#aj-result{margin:10px 0}

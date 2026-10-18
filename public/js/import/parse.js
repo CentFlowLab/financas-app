@@ -104,7 +104,7 @@ export function parseAmount(v, style = null) {
 }
 
 // ---------- datas ----------
-const MONTHS = { jan: 1, janeiro: 1, fev: 2, feb: 2, fevereiro: 2, mar: 3, marco: 3, abr: 4, apr: 4, abril: 4, mai: 5, may: 5, maio: 5, jun: 6, junho: 6, jul: 7, julho: 7, ago: 8, aug: 8, agosto: 8, set: 9, sep: 9, setembro: 9, out: 10, oct: 10, outubro: 10, nov: 11, novembro: 11, dez: 12, dec: 12, dezembro: 12 };
+export const MONTHS = { jan: 1, janeiro: 1, january: 1, ene: 1, enero: 1, fev: 2, feb: 2, fevereiro: 2, february: 2, febrero: 2, mar: 3, marco: 3, march: 3, marzo: 3, abr: 4, apr: 4, abril: 4, april: 4, mai: 5, may: 5, maio: 5, mayo: 5, jun: 6, junho: 6, june: 6, junio: 6, jul: 7, julho: 7, july: 7, julio: 7, ago: 8, aug: 8, agosto: 8, august: 8, set: 9, sep: 9, sept: 9, setembro: 9, september: 9, septiembre: 9, setiembre: 9, out: 10, oct: 10, outubro: 10, october: 10, octubre: 10, nov: 11, novembro: 11, november: 11, noviembre: 11, dez: 12, dec: 12, dic: 12, dezembro: 12, december: 12, diciembre: 12 };
 const p2 = (n) => String(n).padStart(2, '0');
 function validISO(y, m, d) {
   if (!(y >= 1990 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31)) return null;
@@ -140,6 +140,8 @@ export function parseDate(v, order = 'dmy') {
   if (m) return validISO(+m[1], +m[2], +m[3]);
   m = norm(s).match(/^(\d{1,2})[ \-/.]*(?:de )?([a-z]{3,9})\.?[ \-/.,]*(?:de )?(\d{4}|\d{2})(?!\d)/);
   if (m && MONTHS[m[2]]) { let y = +m[3]; if (m[3].length === 2) y += 2000; return validISO(y, MONTHS[m[2]], +m[1]); }
+  m = norm(s).match(/^([a-z]{3,9})\.?[ ]+(\d{1,2})(?:st|nd|rd|th)?,?[ ]+(\d{4})(?!\d)/); // «Apr 12, 2026»
+  if (m && MONTHS[m[1]]) return validISO(+m[3], MONTHS[m[1]], +m[2]);
   return null;
 }
 

@@ -2,13 +2,14 @@
 import { S, save } from '../db.js';
 import { uid, norm } from '../util.js';
 import { accountBalance } from '../model.js';
-import { decodeBytes, detectDelimiter, parseCSV, autoMap, tableToParsed, parseOFX, ofxCharset, parseQIF, balanceInfo, ibanPretty, guessAccountType } from './parse.js';
-import { parseStatementLines } from './pdfstatement.js';
-import { readWorkbook, sheetRows, pdfLines } from './loaders.js';
+import { hclean, decodeBytes, detectDelimiter, parseCSV, autoMap, tableToParsed, parseOFX, ofxCharset, parseQIF, balanceInfo, ibanPretty, guessAccountType } from './parse.js';
+import { parseStatementLines, surveyLines } from './pdfstatement.js';
+import { readWorkbook, sheetRows, pdfLines, renderPdfPages, ocrLines, imageForOcr } from './loaders.js';
+import { aiRequest, extractJson, aiToParsed } from './ai.js';
 import { categorize, learn } from './categorize.js';
 
-export const FORMATOS = { csv: 'CSV', xlsx: 'Excel', ofx: 'OFX', qif: 'QIF', pdf: 'PDF' };
-export const ACEITA = '.csv,.txt,.tsv,.xlsx,.xls,.ofx,.qfx,.qif,.pdf,text/csv,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+export const FORMATOS = { csv: 'CSV', xlsx: 'Excel', ofx: 'OFX', qif: 'QIF', pdf: 'PDF', img: 'Imagem' };
+export const ACEITA = '.csv,.txt,.tsv,.xlsx,.xls,.ofx,.qfx,.qif,.pdf,text/csv,application/pdf,.png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 export async function sha256hex(bytes) {
   try {
@@ -25,6 +26,7 @@ function sniff(bytes, name) {
   const ext = (name.split('.').pop() || '').toLowerCase();
   const head = String.fromCharCode(...bytes.slice(0, 8));
   if (head.startsWith('%PDF')) return 'pdf';
+  if (head.startsWith('\x89PNG') || (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) || (head.startsWith('RIFF') && String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP')) return 'img';
   if (head.startsWith('PK\x03\x04') || head.startsWith('\xd0\xcf\x11\xe0')) return 'xlsx';
   const txt = new TextDecoder('latin1').decode(bytes.slice(0, 3000));
   if (/OFXHEADER|<OFX>/i.test(txt)) return 'ofx';
@@ -33,14 +35,15 @@ function sniff(bytes, name) {
   if (ext === 'qif') return 'qif';
   if (['xlsx', 'xls', 'xlsm'].includes(ext)) return 'xlsx';
   if (ext === 'pdf') return 'pdf';
+  if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) return 'img';
   return 'csv';
 }
 
 // Lê o ficheiro e prepara a análise. src.opts: { encoding, delim, sheet } (alteráveis no passo "Colunas")
-export async function loadSource(file) {
+export async function loadSource(file, { onProgress } = {}) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (!bytes.length) throw new Error('O ficheiro está vazio.');
-  const src = { name: file.name, size: bytes.length, bytes, hash: await sha256hex(bytes), format: sniff(bytes, file.name), opts: { encoding: 'auto', delim: 'auto', sheet: 0 } };
+  const src = { name: file.name, size: bytes.length, bytes, hash: await sha256hex(bytes), format: sniff(bytes, file.name), opts: { encoding: 'auto', delim: 'auto', sheet: 0 }, onProgress };
   await prepare(src, true);
   return src;
 }
@@ -67,20 +70,138 @@ export async function prepare(src, resetMap = true) {
     src.encoding = dec.encoding;
     src.parsed = parseQIF(dec.text);
     if (!src.parsed.rows.length) throw new Error('Não foram encontradas transações neste ficheiro QIF.');
-  } else if (src.format === 'pdf') {
-    const lines = await pdfLines(src.bytes);
-    if (!lines.length) { src.error = 'sem-texto'; throw new Error('Este PDF não tem texto selecionável (parece uma imagem digitalizada). Exporte o extrato em CSV, Excel ou OFX a partir do homebanking.'); }
-    src.parsed = parseStatementLines(lines, src.name);
-    src.parsed.bestEffort = true;
-    if (!src.parsed.rows.length) throw new Error(src.parsed.debts?.length ? 'Este PDF só tem secções de crédito/empréstimo e nenhuma tabela de movimentos de uma conta. Para registar o crédito, crie a dívida em «Dívidas».' : 'Não consegui reconhecer movimentos neste PDF. Experimente exportar o extrato em CSV, Excel ou OFX.');
-    src.parsed.warnings.unshift('Leitura de PDF em modo «melhor esforço»: os extratos de cada banco são diferentes. Reveja cuidadosamente todos os movimentos antes de importar.');
+  } else if (src.format === 'pdf' || src.format === 'img') {
+    await readVisual(src);
+    analyseVisual(src);
   }
-  if (src.table && resetMap) src.map = autoMap(src.table.rows);
+  if (src.table && resetMap) { src.map = autoMap(src.table.rows); src.autoMapJson = JSON.stringify(src.map); applySavedTable(src); }
   return src;
 }
 
+// ---------- PDF / imagem: leitura de texto (ou OCR) e análise ----------
+const MIME = { png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp' };
+async function readVisual(src) {
+  if (src.lines) return;
+  const prog = (m, f = 0) => src.onProgress?.(m, f);
+  let lines;
+  if (src.format === 'pdf') {
+    prog('A ler o PDF…', 0);
+    lines = await pdfLines(src.bytes);
+    if ((lines.chars || 0) < 60) { // sem texto selecionável: digitalização -> OCR
+      src.ocr = true;
+      prog('Este PDF é uma imagem: a preparar o reconhecimento de texto (OCR)…', 0.05);
+      const imgs = await renderPdfPages(src.bytes, { max: 12 });
+      if (imgs.total > imgs.length) src.aviso = `Só foram lidas as primeiras ${imgs.length} de ${imgs.total} páginas (limite do OCR).`;
+      lines = await ocrLines(imgs, prog);
+    }
+  } else {
+    src.ocr = true;
+    const sig = src.bytes[0] === 0x89 ? 'png' : src.bytes[0] === 0xff ? 'jpg' : 'webp';
+    prog('A preparar a imagem…', 0.02);
+    const imgs = await imageForOcr(new Blob([src.bytes], { type: MIME[sig] }));
+    lines = await ocrLines(imgs, prog);
+  }
+  src.lines = lines;
+}
+
+export const parseVisual = (src, o = {}) => parseStatementLines(src.lines, src.name, { ocr: !!src.ocr, ...o });
+
+export function analyseVisual(src) {
+  const lines = src.lines;
+  const sv = surveyLines(lines); src.survey = sv;
+  let parsed = parseVisual(src, { layouts: src.semGuardado ? null : S.settings.importLayouts, layout: src.manual || null });
+  src.guardadoFalhou = false;
+  if (parsed.usadoGuardado && (!parsed.rows.length || parsed.confianca.nivel === 'baixa')) { // layout guardado já não serve: deteção automática
+    const p2 = parseVisual(src);
+    if (p2.rows.length >= parsed.rows.length) { parsed = p2; src.guardadoFalhou = true; parsed.warnings.unshift('O layout guardado deste banco não funcionou neste extrato; usei a deteção automática.'); }
+  }
+  src.parsed = parsed;
+  if (!parsed.rows.length) {
+    if (parsed.debts?.length) throw new Error('Este PDF só tem secções de crédito/empréstimo e nenhuma tabela de movimentos de uma conta. Para registar o crédito, crie a dívida em «Dívidas».');
+    if (sv.candidatas < 2 && !sv.cabecalhos) {
+      throw new Error(src.ocr
+        ? 'Não consegui reconhecer um extrato nesta imagem (nem datas nem valores em tabela). Experimente uma foto mais nítida e direita, ou exporte o extrato em CSV, Excel ou OFX.'
+        : 'Este PDF não parece ser um extrato bancário: não encontrei movimentos (datas com valores) nem cabeçalhos de tabela. Se for um extrato, exporte-o em CSV, Excel ou OFX no homebanking.');
+    }
+  }
+  parsed.bestEffort = true;
+  if (src.ocr) parsed.warnings.unshift('Texto lido por OCR (reconhecimento ótico de imagem) — melhor esforço: números e datas podem ter erros. Confirme todos os movimentos antes de importar.');
+  else parsed.warnings.unshift('Leitura de PDF em modo «melhor esforço»: os extratos de cada banco são diferentes. Reveja cuidadosamente todos os movimentos antes de importar.');
+  if (src.aviso) parsed.warnings.push(src.aviso);
+  return parsed;
+}
+
+// Reanálise depois de o utilizador ajustar colunas/formatos à mão
+export function applyManualLayout(src, layout) { src.manual = layout; src.excluded = new Set(); src.useAi = false; return analyseVisual(src); }
+
+// ---------- interpretação com IA (opcional, pedida pelo utilizador) ----------
+export const aiAvailable = () => !!S.settings.ia?.chave;
+export const aiHost = () => { try { return new URL(S.settings.ia.url).host; } catch { return S.settings.ia?.url || 'o serviço configurado'; } };
+export async function interpretWithAI(src, { signal } = {}) {
+  const { content, truncado } = await aiRequest({ lines: src.lines, fileName: src.name, ia: S.settings.ia, signal });
+  const parsed = aiToParsed(extractJson(content), { base: src.parsed, truncado });
+  src.aiParsed = parsed; src.useAi = true; src.excluded = new Set();
+  return parsed;
+}
+
 export const isTable = (src) => !!src.table;
-export const getParsed = (src) => (src.table ? tableToParsed(src.table.rows, src.map, src.name) : src.parsed);
+export function getParsed(src) {
+  if (src.table) return tableToParsed(src.table.rows, src.map, src.name);
+  const base = src.useAi && src.aiParsed ? src.aiParsed : src.parsed;
+  if (!src.excluded?.size) return base;
+  return { ...base, rows: base.rows.filter((r) => !src.excluded.has(r.contaKey || '')), accounts: Object.fromEntries(Object.entries(base.accounts || {}).filter(([k]) => !src.excluded.has(k))) };
+}
+
+// ---------- layouts memorizados (PDF/imagem e CSV/Excel) ----------
+const hashS = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
+const LAY = () => (S.settings.importLayouts ||= {});
+export function listLayouts() {
+  const seen = new Set(), out = [];
+  for (const [k, v] of Object.entries(LAY())) { const id = (v.keys || [k]).join('|'); if (seen.has(id)) continue; seen.add(id); out.push({ id: k, nome: v.nome || 'Layout guardado', kind: v.kind || 'pdf', quando: v.quando || '' }); }
+  return out;
+}
+export async function forgetLayout(id) {
+  const v = LAY()[id]; if (!v) return;
+  for (const k of v.keys || [id]) delete LAY()[k];
+  await save('settings');
+}
+async function storeLayout(keys, entry) {
+  keys = [...new Set(keys.filter(Boolean))]; if (!keys.length) return false;
+  const e = { ...entry, keys, quando: new Date().toISOString().slice(0, 10) };
+  for (const k of keys) LAY()[k] = e;
+  const all = listLayouts().sort((a, b) => String(a.quando).localeCompare(String(b.quando)));
+  for (const old of all.slice(0, Math.max(0, all.length - 30))) { for (const k of LAY()[old.id]?.keys || [old.id]) delete LAY()[k]; }
+  await save('settings');
+  return true;
+}
+// PDF/imagem: guarda o layout ajustado pelo utilizador sob as impressões digitais do documento (cabeçalho + IBAN, cabeçalho, topo da página)
+export async function rememberPdfLayout(src, layout) {
+  const p = src.parsed; if (!p?.fingerprints?.length || !layout?.cols?.length) return false;
+  const nome = (p.meta?.bank?.nome || '') + (p.meta?.iban ? ' …' + p.meta.iban.slice(-4) : '') || src.name;
+  return storeLayout(p.fingerprints, { ...layout, kind: 'pdf', nome: (nome.trim() || src.name) + (src.ocr ? ' (OCR)' : '') });
+}
+// CSV/Excel: impressão digital = rótulos do cabeçalho + nº de colunas (ou padrão de tipos das colunas, sem cabeçalho)
+export function tableFingerprint(src) {
+  const rows = src.table?.rows || []; if (!rows.length || !src.map) return null;
+  const nc = rows.reduce((a, r) => Math.max(a, r.length), 0), h = src.map.headerRow;
+  if (h >= 0) return `c:${hashS(rows[h].map((c) => hclean(c)).join('|'))}:${nc}`;
+  const kind = (v) => { const t = String(v ?? '').trim(); return !t ? '-' : /^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}$/.test(t) ? 'd' : /^[-+(]?[\d.,\s]+\)?$/.test(t) ? 'n' : 't'; };
+  const r0 = rows.find((r) => r.some((c) => String(c ?? '').trim())) || [];
+  return `c0:${nc}:${hashS(Array.from({ length: nc }, (_, i) => kind(r0[i])).join(''))}`;
+}
+function applySavedTable(src) {
+  src.savedTable = null;
+  const fp = tableFingerprint(src), e = fp && LAY()[fp];
+  if (!e || e.kind !== 'tabela' || src.semGuardado) return;
+  src.map = { ...src.map, ...e.map, headerRow: src.map.headerRow };
+  src.savedTable = { fp, nome: e.nome };
+}
+export const mapChangedFromAuto = (src) => !!src.table && JSON.stringify(src.map) !== src.autoMapJson;
+export async function rememberTableLayout(src) {
+  const fp = tableFingerprint(src); if (!fp) return false;
+  const { headerRow, ...map } = src.map;
+  return storeLayout([fp], { kind: 'tabela', map, nome: `${FORMATOS[src.format] || 'Tabela'}: ${src.name.replace(/\.[^.]+$/, '').slice(0, 30)}` });
+}
 
 // ---------- contas ----------
 const stem = (name) => name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40) || 'Conta importada';

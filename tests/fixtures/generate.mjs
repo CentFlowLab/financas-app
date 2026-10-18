@@ -210,5 +210,10 @@ const expected = {};
     dez: { n: dez.n, abertura: dez.opening, final: dez.final, soma: dez.soma },
   };
 }
+// ---------- 8) PDFs sintéticos de estilos diferentes (ver generate-pdf.mjs) ----------
+{
+  const { generatePdfFixtures } = await import('./generate-pdf.mjs');
+  expected.gen = await generatePdfFixtures();
+}
 out('expected.json', JSON.stringify(expected, null, 1) + '\n');
 console.log('fixtures geradas:', Object.keys(expected).join(', '));

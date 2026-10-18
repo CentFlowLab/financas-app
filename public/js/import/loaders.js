@@ -1,4 +1,7 @@
 // Importar extratos — carregamento (lazy, local) das bibliotecas SheetJS (Excel) e pdf.js (PDF). Offline: ficheiros em vendor/ pré-guardados no service worker.
+import { linesFromItems } from './layout.js';
+import { recognizeWords } from '../ocr.js';
+import { prepareForOCR, loadBitmap } from '../image.js';
 const here = (p) => new URL(p, import.meta.url).href;
 
 let xlsxP;
@@ -43,39 +46,83 @@ export async function sheetRows(wb, index = 0) {
   return rows;
 }
 
-// PDF -> linhas de texto com posições (agrupadas por coordenada vertical; células separadas por espaços largos)
-export async function pdfLines(bytes) {
+// ---------- PDF ----------
+async function openPdf(bytes) {
   const pdfjs = await import(/* @vite-ignore */ here('../../vendor/pdfjs/pdf.min.mjs')).catch(() => { throw new Error('Não foi possível carregar o leitor de PDF (sem ligação e ainda não guardado offline?).'); });
   pdfjs.GlobalWorkerOptions.workerSrc = here('../../vendor/pdfjs/pdf.worker.min.mjs');
-  let doc;
-  try { doc = await pdfjs.getDocument({ data: bytes.slice(), verbosity: 0, isEvalSupported: false }).promise; }
+  try { return await pdfjs.getDocument({ data: bytes.slice(), verbosity: 0, isEvalSupported: false }).promise; }
   catch (e) { throw new Error(/password/i.test(e?.message || e?.name || '') ? 'Este PDF está protegido por palavra-passe.' : 'Não foi possível ler este PDF.'); }
-  const lines = [];
-  for (let p = 1; p <= doc.numPages; p++) {
-    const page = await doc.getPage(p);
-    const tc = await page.getTextContent();
-    // texto rodado (margens verticais, marcas de água) é ignorado: mistura-se com as linhas da tabela e engole datas
-    const items = tc.items.filter((i) => i.str && i.str.trim() !== '' && !(Math.abs(i.transform[1]) > Math.abs(i.transform[0]) * 0.5 || Math.abs(i.transform[2]) > Math.abs(i.transform[3]) * 0.5)).map((i) => ({ s: i.str, x: i.transform[4], y: i.transform[5], w: i.width, h: Math.abs(i.height) || Math.abs(i.transform[3]) || 10 }));
-    items.sort((a, b) => b.y - a.y || a.x - b.x);
-    const groups = [];
-    for (const it of items) {
-      const g = groups.find((x) => Math.abs(x.y - it.y) <= Math.max(2, it.h * 0.4));
-      if (g) g.items.push(it); else groups.push({ y: it.y, items: [it] });
-    }
-    groups.sort((a, b) => b.y - a.y);
-    for (const g of groups) {
-      g.items.sort((a, b) => a.x - b.x);
-      const cells = [];
-      for (const it of g.items) {
-        const last = cells[cells.length - 1];
-        const gap = last ? it.x - last.x2 : Infinity;
-        if (last && gap < it.h * 0.15) { last.s += it.s; last.x2 = it.x + it.w; }
-        else if (last && gap < it.h * 0.8) { last.s += ' ' + it.s; last.x2 = it.x + it.w; }
-        else cells.push({ s: it.s, x: it.x, x2: it.x + it.w });
-      }
-      lines.push({ cells, text: cells.map((c) => c.s.trim()).join('  '), page: p });
-    }
-  }
+}
+// Itens de texto de uma página, na orientação dominante (texto rodado — margens verticais, marcas de água — é ignorado:
+// mistura-se com as linhas da tabela e engole datas). Coordenadas: origem em baixo à esquerda (como no PDF).
+const dirOf = (t) => { const a = Math.atan2(t[1], t[0]) * 180 / Math.PI; return Math.round(((a % 360) + 360) % 360 / 90) % 4; };
+function pageItems(tc, dom) {
+  return tc.items.filter((i) => i.str && i.str.trim() !== '' && dirOf(i.transform) === dom).map((i) => {
+    const [e, f] = [i.transform[4], i.transform[5]];
+    const [x, y] = dom === 0 ? [e, f] : dom === 1 ? [f, -e] : dom === 2 ? [-e, -f] : [-f, e];
+    return { s: i.str, x, y, w: i.width, h: Math.abs(i.height) || Math.abs(i.transform[3]) || 10 };
+  });
+}
+// orientação dominante do documento (só se o texto noutra direção for >3× o horizontal, o documento está rodado)
+function dominantDir(tcs) {
+  const w = [0, 0, 0, 0];
+  for (const tc of tcs) for (const i of tc.items) if (i.str && i.str.trim()) w[dirOf(i.transform)] += i.str.length;
+  const mx = Math.max(...w); return mx > w[0] * 3 && mx > 40 ? w.indexOf(mx) : 0;
+}
+// PDF -> linhas de texto com posições (agrupadas por coordenada vertical; células separadas por espaços largos).
+// A matriz devolvida traz .numPages e .chars (nº de carateres de texto) para decidir se é preciso OCR.
+export async function pdfLines(bytes) {
+  const doc = await openPdf(bytes);
+  const lines = []; let chars = 0; const pages = [];
+  for (let p = 1; p <= doc.numPages; p++) { const page = await doc.getPage(p); pages.push({ page, tc: await page.getTextContent() }); }
+  const dom = dominantDir(pages.map((x) => x.tc));
+  pages.forEach(({ page, tc }, k) => {
+    const vp = page.getViewport({ scale: 1 });
+    const items = pageItems(tc, dom); chars += items.reduce((a, i) => a + i.s.length, 0);
+    lines.push(...linesFromItems(items, k + 1, dom % 2 ? vp.height : vp.width, dom % 2 ? vp.width : vp.height));
+  });
   await doc.destroy?.();
+  lines.numPages = doc.numPages; lines.chars = chars;
   return lines;
+}
+// Páginas de um PDF digitalizado -> imagens (canvas -> Blob PNG), para OCR. máx. páginas limitado.
+export async function renderPdfPages(bytes, { max = 12, width = 2000, onProgress = () => {} } = {}) {
+  const doc = await openPdf(bytes);
+  const out = [];
+  const n = Math.min(doc.numPages, max);
+  for (let p = 1; p <= n; p++) {
+    onProgress(p, n);
+    const page = await doc.getPage(p);
+    const v1 = page.getViewport({ scale: 1 }); const scale = Math.min(4, Math.max(1.5, width / v1.width));
+    const vp = page.getViewport({ scale });
+    const c = document.createElement('canvas'); c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+    const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    out.push({ blob: await new Promise((res) => c.toBlob(res, 'image/png')), w: c.width, h: c.height, page: p });
+  }
+  const total = doc.numPages;
+  await doc.destroy?.();
+  out.total = total;
+  return out;
+}
+
+// ---------- OCR (digitalizações e fotos) ----------
+// images: [{ blob, w, h, page }] -> linhas (mesma estrutura do PDF de texto), com a página normalizada para 595 pt de largura
+export async function ocrLines(images, onProgress = () => {}) {
+  const lines = [];
+  for (let k = 0; k < images.length; k++) {
+    const im = images[k]; const tag = images.length > 1 ? ` (página ${k + 1} de ${images.length})` : '';
+    const words = await recognizeWords(im.blob, (p, st) => onProgress(`${st}${tag}`, (k + p) / images.length));
+    const f = 595 / im.w;
+    const items = words.filter((w) => w.conf >= 20 && String(w.text).trim()).map((w) => ({ s: w.text, x: w.x0 * f, y: (im.h - w.y1) * f, w: (w.x1 - w.x0) * f, h: Math.max(3, w.y1 - w.y0) * f }));
+    lines.push(...linesFromItems(items, im.page ?? k + 1, 595, im.h * f));
+  }
+  lines.ocr = true; lines.chars = lines.reduce((a, l) => a + l.text.length, 0);
+  return lines;
+}
+// Foto/captura de ecrã -> imagem preparada para OCR (cinzentos + contraste, ampliada se pequena)
+export async function imageForOcr(file) {
+  const blob = await prepareForOCR(file);
+  const bmp = await loadBitmap(blob);
+  return [{ blob, w: bmp.width, h: bmp.height, page: 1 }];
 }

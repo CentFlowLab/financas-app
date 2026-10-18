@@ -33,3 +33,14 @@ export async function recognize(blob, onProgress = () => {}) {
   return data.text || '';
 }
 export const warmup = () => getWorker();
+
+// Palavras com posição (caixa) para reconstruir tabelas: [{ text, x0, y0, x1, y1, conf }] em píxeis da imagem
+export async function recognizeWords(blob, onProgress = () => {}) {
+  handler = (m) => { if (m.status === 'recognizing text') onProgress(m.progress, 'A ler o texto…'); else onProgress(0, 'A preparar o motor de leitura…'); };
+  onProgress(0, 'A preparar o motor de leitura…');
+  const w = await getWorker();
+  const { data } = await withTimeout(w.recognize(blob, {}, { blocks: true }), 240000, 'A leitura demorou demasiado.');
+  const out = [];
+  for (const b of data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || []) for (const wd of l.words || []) out.push({ text: wd.text, x0: wd.bbox.x0, y0: wd.bbox.y0, x1: wd.bbox.x1, y1: wd.bbox.y1, conf: wd.confidence });
+  return out;
+}

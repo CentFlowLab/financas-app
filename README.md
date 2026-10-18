@@ -33,7 +33,9 @@ Painel, Contas, Movimentos e Definições têm um botão **Importar extrato** (t
 | Excel `.xlsx` / `.xls` | SheetJS 0.18.5 (local); escolha da folha |
 | OFX | SGML e XML; saldo final (`LEDGERBAL`) usado para o saldo de abertura |
 | QIF | datas e valores com vírgula decimal |
-| PDF (texto) | **melhor esforço** — pdf.js 5.6 (local). Exige PDF com texto selecionável (PDF digitalizado não é lido). Obriga a confirmar «Revi os movimentos» antes de importar |
+| PDF (texto) | **melhor esforço** — pdf.js 5.6 (local). Leitor **genérico** (qualquer banco/layout): tabela detetada por cabeçalhos PT/EN/ES e posição das colunas, com alternativa por linhas «data … valor». Obriga a confirmar «Revi os movimentos» antes de importar |
+| PDF digitalizado, PNG, JPG, WebP | **melhor esforço** — as páginas/imagens são lidas por OCR (tesseract.js, local, offline) e passam pelo mesmo leitor de tabelas. Confiança nunca «alta»; revisão obrigatória |
+| Interpretação com IA (opcional) | Só aparece com chave de API em Definições (compatível com OpenAI). O texto do extrato é enviado ao serviço configurado **só depois de confirmar, de cada vez** (IBAN/números longos reduzidos aos 4 últimos dígitos); o resultado passa pelas mesmas validações e pela revisão |
 
 ### O que faz
 - **Mapeamento de colunas** inteligente (data movimento/valor, descrição, montante com sinal ou Débito/Crédito, saldo, IBAN/conta) com pré-visualização em direto; números `1.234,56`, `1 234,56`, sinal no fim, `€`; datas `dd-mm-aaaa`, `dd/mm/aaaa`, `aaaa-mm-dd`.
@@ -44,9 +46,11 @@ Painel, Contas, Movimentos e Definições têm um botão **Importar extrato** (t
 - **Histórico** de importações com **Anular importação** (remove exatamente os movimentos e contas criados). Reimportar o mesmo ficheiro é seguro (deteção por hash e duplicados).
 
 ### Limitações (honestas)
-- **Nenhum extrato real foi usado nos testes**; só ficheiros fictícios gerados em `tests/fixtures` (`npm run fixtures`).
+- **Os testes só usam ficheiros fictícios** gerados em `tests/fixtures` (`npm run fixtures`); nenhum dado pessoal real é guardado no repositório.
 - **Layouts de bancos** (CGD, Millennium bcp, Novo Banco, Santander, BPI, ActivoBank, Moey, Montepio, Revolut, N26, Trade Republic, Wise) são heurísticas genéricas por nome de coluna; não são formatos oficiais confirmados. Se o mapeamento automático falhar, ajuste no passo «Colunas».
-- **PDF**: cada banco tem um desenho diferente; PDFs digitalizados e tabelas multilinha complexas não são suportados. Extratos *consolidados* (vários produtos) são lidos por secções (`js/import/pdfstatement.js`): só as tabelas «Detalhe de Movimentos da Conta…» viram movimentos (datas «dd-mm» completadas com o ano do período; «Saldo Inicial»/«Saldo Final» do próprio extrato; sinais validados/corrigidos pela cadeia de saldos); créditos/empréstimos são sugeridos como dívidas (opcional); avisos, resumos e rodapés são ignorados. Vários extratos consecutivos da mesma conta (reconhecida por IBAN) acumulam-se sem alterar o saldo inicial e com verificação do saldo de abertura.
+- **PDF/imagem — o que o leitor genérico faz** (`js/import/layout.js`, `tokens.js`, `pdfstatement.js`): linhas e colunas a partir da posição do texto (pdf.js) ou das caixas de palavras (OCR); tabela por cabeçalhos (`Data`, `Data Mov./Valor`, `Descrição/Descritivo/Movimento/Details/Concepto`, `Débito/Crédito/Débitos/Créditos/Montante/Valor/Amount/Importe`, `Saldo/Balance`) ou, sem cabeçalho, linhas com data no início e valor(es) no fim; valor único com sinal, Débito/Crédito separados, sinal no fim (`45,00-`), `CR/DB`; datas `dd-mm`, `dd/mm`, `dd.mm`, `dd-mm-aaaa`, `aaaa-mm-dd`, `12 abr`, `12 Apr 2026`, `Apr 12, 2026` (ano deduzido do período/título quando falta); descrições de várias linhas; data de movimento vs. data valor; cabeçalhos/rodapés repetidos e texto rodado na margem ignorados; vários produtos num PDF (contas, poupança, cartões) reconhecidos como secções que o utilizador escolhe importar, créditos como sugestão opcional de dívida; **validação por cadeia de saldos** (correção automática de sinais) e pelo saldo inicial/final; sem coluna de saldo, o sinal deduz-se da coluna (débito/crédito), de marcas e de palavras-chave (compra, pagamento, transferência enviada/recebida, juros, comissão, ordenado…) e as linhas duvidosas ficam como «sinal incerto». Hints de bancos específicos (ex.: Santander consolidado) são só reforços opcionais.
+- **Confiança e ajuste manual**: depois de escolher o ficheiro vê «Detetei N movimentos de M contas, confiança alta/média/baixa» (e porquê). Confiança **baixa** (ou nenhum movimento) leva ao passo **«Ajustar leitura do PDF»**: pré-visualização das linhas/colunas lidas, escolha do papel de cada coluna (data, descrição, débito, crédito, valor, saldo), formato da data, tipo de conta, inverter sinais e ignorar linhas (cabeçalhos/rodapés). O layout fica **memorizado** (impressão digital = cabeçalho da tabela + prefixo do IBAN / topo da página; só colunas e formatos, nunca texto do extrato) e os extratos seguintes do mesmo banco usam-no automaticamente. O mesmo para CSV/Excel («Apliquei o mapeamento guardado»). Os layouts guardados listam-se (e esquecem-se) no ecrã inicial de Importar.
+- **Limites do PDF/OCR**: cada banco é diferente — o leitor genérico foi validado com ficheiros sintéticos (`tests/fixtures/generate-pdf.mjs`) e com um extrato real de um banco verificado localmente (fora do repositório), **não** com extratos reais de outros bancos. Linhas com a data fora do início, tabelas sem colunas alinhadas, extratos com colunas coladas, valores sem decimais, ou a descrição antes da data podem falhar (use o ajuste manual ou CSV/OFX). O OCR depende da qualidade da imagem (limite: 12 páginas) e pode trocar dígitos — a cadeia de saldos ajuda a detetá-lo, mas reveja sempre. A IA pode errar ou omitir linhas; nunca é usada sem a sua confirmação.
 - Transferências só são emparelhadas dentro da mesma importação; moedas que não EUR só geram aviso; cabeçalhos de várias linhas não são suportados; a deteção de duplicados exige a mesma data.
 - Anular uma importação mantém a conta criada se já tiver movimentos de outra origem.
 
@@ -74,11 +78,12 @@ Para desenvolver sem build: `npm run serve:dev` (serve `public/` em http://local
 ```bash
 npx playwright install chromium    # uma vez
 npm start &                        # servidor em :8080
-npm test                           # tests/e2e.mjs + tests/import.e2e.mjs
+npm test                           # tests/e2e.mjs + tests/import.e2e.mjs + tests/generic.e2e.mjs
 npm run test:import                # só a importação de extratos
+npm run test:generic               # só o leitor genérico de PDF/imagem (layouts, OCR, ajuste manual, IA simulada)
 npm run fixtures                   # regenera tests/fixtures (dados fictícios)
 ```
-`e2e.mjs` cobre todos os módulos, OCR com um talão sintético, exportar/importar, tema, offline e erros de consola. `import.e2e.mjs` cobre a importação (CSV/XLSX/XLS/OFX/QIF/PDF, mapeamento, contas, duplicados, anular, categorias, transferências, migração v2→v3, offline).
+`e2e.mjs` cobre todos os módulos, OCR com um talão sintético, exportar/importar, tema, offline e erros de consola. `import.e2e.mjs` cobre a importação (CSV/XLSX/XLS/OFX/QIF/PDF, mapeamento, contas, duplicados, anular, categorias, transferências, migração v2→v3, offline). `generic.e2e.mjs` cobre o leitor genérico com 19 PDFs/imagens sintéticos (débito/crédito, valor único, `dd-mm` sem ano, inglês, espanhol, várias contas, cartão, digitalizados por OCR, margem rodada/cabeçalhos repetidos, ficheiro que não é extrato), o passo «Ajustar leitura», a memória de layouts (PDF e CSV) e a IA com endpoint simulado.
 
 ## Estrutura
 
@@ -91,8 +96,9 @@ public/                 código-fonte da app (HTML/CSS/JS sem framework)
   js/model.js           saldos, dívidas, combustível, garantias, preços
   js/modules/*.js       um ficheiro por separador
   js/modules/importar.js  assistente de importação de extratos
-  js/import/              parse.js (CSV/OFX/QIF, números, datas, IBAN), pdfstatement.js (PDF por secções), categorize.js,
-                          loaders.js (SheetJS, pdf.js), engine.js (contas, duplicados, transferências, gravar/anular), sample.js
+  js/import/              parse.js (CSV/OFX/QIF, números, datas, IBAN), tokens.js + layout.js (leitor genérico de tabelas), pdfstatement.js
+                          (orquestração PDF/imagem, confiança, layouts memorizados), ai.js (IA opcional), categorize.js,
+                          loaders.js (SheetJS, pdf.js, OCR), engine.js (contas, duplicados, transferências, gravar/anular), sample.js
   js/ocr.js, receipt-parser.js, image.js, charts.js, ui.js, util.js, demo.js
   vendor/tesseract/     motor OCR + dados de português (local, funciona offline)
   vendor/xlsx/          SheetJS 0.18.5 (Apache-2.0), carregado a pedido
@@ -101,7 +107,8 @@ scripts/build.mjs       public/ → dist/ + pré-cache do service worker
 scripts/serve.mjs       servidor estático mínimo
 tests/e2e.mjs           teste ponta-a-ponta (Playwright)
 tests/import.e2e.mjs    teste da importação de extratos
-tests/fixtures/         extratos fictícios (CSV, XLSX, XLS, OFX, QIF, PDF) + generate.mjs
+tests/generic.e2e.mjs   teste do leitor genérico de PDF/imagem
+tests/fixtures/         extratos fictícios (CSV, XLSX, XLS, OFX, QIF, PDF, imagens) + generate.mjs, generate-pdf.mjs
 ```
 
 ### Modelo de dados (v3, esquema `financas-pessoais`)

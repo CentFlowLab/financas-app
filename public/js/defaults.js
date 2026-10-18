@@ -45,4 +45,4 @@ export const DEFAULT_ACCOUNTS = () => [
 
 export const PALETTE = ['#2f9e8f', '#f59e0b', '#6366f1', '#ef4444', '#06b6d4', '#a855f7', '#84cc16', '#ec4899', '#f97316', '#3b82f6', '#14b8a6', '#eab308', '#8b5cf6', '#64748b'];
 export const FUEL_TYPES = ['Gasolina 95', 'Gasolina 98', 'Gasóleo', 'Gasóleo colorido', 'GPL', 'Elétrico', 'Híbrido', 'Outro'];
-export const DEFAULT_SETTINGS = () => ({ tema: 'auto', extraDivida: 0, alertaGarantiaDias: 60, ia: { url: 'https://api.openai.com/v1', modelo: 'gpt-4o-mini', chave: '' } });
+export const DEFAULT_SETTINGS = () => ({ tema: 'auto', extraDivida: 0, alertaGarantiaDias: 60, ia: { url: 'https://api.openai.com/v1', modelo: 'gpt-4o-mini', chave: '' }, importLayouts: {} });

@@ -68,5 +68,285 @@
    "final": 229967,
    "soma": 154861
   }
+ },
+ "gen": {
+  "a": {
+   "n": 15,
+   "opening": 154320,
+   "final": 202792,
+   "soma": 48472,
+   "entradas": 4,
+   "saidas": 11,
+   "first": "ORDENADO EMPRESA ALFA LDA",
+   "firstDate": "2026-03-02",
+   "lastDate": "2026-03-30",
+   "lastValor": -12345,
+   "iban": "PT50999900010000000000001"
+  },
+  "b": {
+   "n": 12,
+   "soma": 149218,
+   "entradas": 4,
+   "saidas": 8,
+   "firstDate": "2026-04-01",
+   "lastDate": "2026-04-28",
+   "lastValor": -20000,
+   "first": "ORDENADO EMPRESA BETA SA",
+   "b2": {
+    "n": 10,
+    "valores": [
+     162000,
+     -6789,
+     -5120,
+     3000,
+     -5000,
+     64,
+     -450,
+     -3499,
+     0,
+     0
+    ],
+    "incertos": 2,
+    "sinais": [
+     1,
+     -1,
+     -1,
+     1,
+     -1,
+     1,
+     -1,
+     -1,
+     0,
+     0
+    ]
+   }
+  },
+  "c": {
+   "n": 15,
+   "opening": 250000,
+   "final": 354065,
+   "soma": 104065,
+   "firstDate": "2026-03-02",
+   "lastDate": "2026-03-30",
+   "descs": [
+    "COMPRA LOJA DE ELETRODOMESTICOS CENTRO COMERCIAL DELTA REF 55123",
+    "TRF CRED SEPA+ ORDENADO EMPRESA DELTA LDA",
+    "PAGAMENTO SERVICOS",
+    "COMPRA SUPERMERCADO DELTA",
+    "TRANSFERENCIA PARA POUPANCA OBJETIVO FERIAS ORDEM PERMANENTE",
+    "COMPRA FARMACIA DELTA",
+    "DEPOSITO NUMERARIO AGENCIA DELTA CENTRO",
+    "DD SEGURO AUTOMOVEL APOLICE 0099-TESTE",
+    "COMPRA ONLINE LIVRARIA",
+    "TRF IMEDIATA DE FULANO TESTE",
+    "COMPRA POSTO COMBUSTIVEL A1 AREA DE SERVICO DELTA",
+    "PAGAMENTO CARTAO DE CREDITO",
+    "COMPRA CAFE DELTA",
+    "IMPOSTO DO SELO",
+    "TRF CRED SEPA+ SUBSIDIO SEGURANCA SOCIAL"
+   ],
+   "entradas": 4,
+   "saidas": 11
+  },
+  "d": {
+   "n": 11,
+   "opening": 312050,
+   "final": 492624,
+   "soma": 180574,
+   "firstDate": "2026-04-01",
+   "lastDate": "2026-04-28",
+   "entradas": 4,
+   "saidas": 7,
+   "rentValor": -123456,
+   "first": "Payment from Fulano Test",
+   "d2": {
+    "n": 5,
+    "soma": 70290,
+    "final": 170290,
+    "opening": 100000,
+    "firstDate": "2026-04-02",
+    "lastDate": "2026-04-20",
+    "valores": [
+     90000,
+     -30000,
+     -4590,
+     -120,
+     15000
+    ]
+   }
+  },
+  "e": {
+   "sections": 3,
+   "ord": {
+    "n": 5,
+    "opening": 80000,
+    "final": 189130
+   },
+   "pou": {
+    "n": 2,
+    "opening": 500000,
+    "final": 520215
+   },
+   "car": {
+    "n": 5,
+    "opening": -12500,
+    "final": -14649,
+    "valores": [
+     -4999,
+     -3250,
+     -5000,
+     12500,
+     -1400
+    ]
+   },
+   "total": 12,
+   "iban1": "PT50999900060000000000006",
+   "iban2": "PT50999900070000000000007"
+  },
+  "f": {
+   "n": 8,
+   "valores": [
+    -4599,
+    -1260,
+    -8734,
+    35000,
+    -4250,
+    -1199,
+    2000,
+    -410
+   ],
+   "soma": 16548,
+   "firstDate": "2026-04-02",
+   "lastDate": "2026-04-25",
+   "entradas": 2,
+   "saidas": 6,
+   "tipo": "cartao",
+   "opening": 35000,
+   "final": 18452
+  },
+  "h": {
+   "n": 18,
+   "opening": 100000,
+   "final": 194178,
+   "soma": 94178,
+   "firstDate": "2026-03-02",
+   "lastDate": "2026-03-30",
+   "descs": [
+    "COMPRA SUPERMERCADO ETA",
+    "TRF RECEBIDA FULANO TESTE",
+    "PAGAMENTO LUZ ETA",
+    "COMPRA CAFE ETA",
+    "DD AGUA ETA",
+    "ORDENADO EMPRESA ETA",
+    "COMPRA ROUPA ETA",
+    "COMPRA LIVRARIA ETA",
+    "TRF ENVIADA CICLANO",
+    "COMPRA PADARIA ETA",
+    "COMPRA GINASIO ETA",
+    "COMPRA GASOLEO ETA",
+    "REEMBOLSO ETA",
+    "COMPRA JARDIM ETA",
+    "PAGAMENTO SEGURO ETA",
+    "COMPRA CINEMA ETA",
+    "TRF RECEBIDA BELTRANO",
+    "COMPRA SUPERMERCADO ETA"
+   ]
+  },
+  "i": {},
+  "j": {
+   "n": 12,
+   "soma": 127995,
+   "valores": [
+    -4321,
+    150000,
+    -2750,
+    -1999,
+    6000,
+    -8400,
+    -320,
+    -3500,
+    2500,
+    -1250,
+    -2290,
+    -5675
+   ],
+   "firstDate": "2026-03-02",
+   "lastDate": "2026-03-29",
+   "iban": "PT50999900110000000000001",
+   "j2": {
+    "n": 6,
+    "soma": 140310,
+    "valores": [
+     -3890,
+     150000,
+     -1500,
+     -6200,
+     4000,
+     -2100
+    ],
+    "firstDate": "2026-04-01",
+    "lastDate": "2026-04-21",
+    "iban": "PT50999900110000000000001"
+   }
+  },
+  "k": {
+   "n": 8,
+   "abs": [
+    4321,
+    150000,
+    2750,
+    1999,
+    6000,
+    8400,
+    320,
+    3500
+   ]
+  },
+  "l": {
+   "n": 6,
+   "valores": [
+    -4512,
+    189000,
+    -6890,
+    5000,
+    -1275,
+    -6000
+   ],
+   "opening": 100000,
+   "final": 275323,
+   "firstDate": "2026-03-02",
+   "lastDate": "2026-03-20",
+   "iban": "ES9121000418450200051332",
+   "m": {
+    "n": 5,
+    "valores": [
+     -5430,
+     150000,
+     -2310,
+     4000,
+     -3260
+    ],
+    "firstDate": "2026-04-03",
+    "lastDate": "2026-04-18"
+   }
+  },
+  "g": {
+   "n": 8,
+   "opening": 90000,
+   "final": 250510,
+   "soma": 160510,
+   "firstDate": "2026-03-02",
+   "lastDate": "2026-03-27",
+   "valores": [
+    172500,
+    -5890,
+    -4720,
+    3500,
+    -1260,
+    -4000,
+    2230,
+    -1850
+   ]
+  }
  }
 }

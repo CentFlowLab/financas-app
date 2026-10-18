@@ -1,193 +1,94 @@
-// Importar extratos — PDF (ciente de secções). Funções puras, sem DOM.
-// Um extrato PDF pode ser «consolidado»: páginas de avisos, resumo de contas, o detalhe da conta à ordem (tabela com
-// cabeçalhos repetidos em cada página), secções de crédito/empréstimo, etc. Só as tabelas de movimentos de contas
-// (ordem, poupança, …) viram movimentos; os créditos são devolvidos como sugestões de dívidas; o resto é ignorado.
+// Importar extratos — extratos em PDF/imagem (texto com posições). Funções puras, sem DOM.
+// Pipeline genérico (layout.js): cabeçalhos de tabela PT/EN/ES, colunas por posição, secções (várias contas/cartões), datas/valores/sinais,
+// cadeia de saldos. Os «hints» de bancos específicos (ex.: secções «Empréstimo … Número:» do Santander) são reforços opcionais: créditos
+// viram sugestões de dívidas e «Resumo das Contas» serve de verificação cruzada.
 import { norm } from '../util.js';
-import { parseAmount, parseDate, findIban, detectBank, guessAccountType, validateChain, hclean } from './parse.js';
+import { parseAmount, parseDate, findIban, detectBank, guessAccountType, hclean } from './parse.js';
+import { MONTHS } from './parse.js';
+import { datesIn, isAmt } from './tokens.js';
+import { extractSections, concludeSection, makeYearOf, isHeading, layoutFromCols, colsFromLayout, prepare, sigOf, findHeaders } from './layout.js';
 
 const firstCell = (l) => (l.cells && l.cells[0] ? l.cells[0].s : l.text).trim();
 const D_FULL = '(?:\\d{4}-\\d{2}-\\d{2}|\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}|\\d{1,2} (?:de )?[A-Za-zçÇ]{3,9}\\.? (?:de )?\\d{2,4})';
-const D_SHORT = '\\d{1,2}[-/.]\\d{1,2}(?![-/.\\d])'; // «dd-mm» sem ano (o ano vem do período do extrato)
-const rowDateRe = (short) => { const t = short ? `(?:${D_FULL}|${D_SHORT})` : D_FULL; return new RegExp(`^\\s*(${t})(?:\\s+(${t}))?(?=\\s|$)\\s*(.*)$`, 'i'); };
+const rowDateRe = (short) => { const t = short ? `(?:${D_FULL}|\\d{1,2}[-/.]\\d{1,2}(?![-/.\\d]))` : D_FULL; return new RegExp(`^\\s*(${t})(?:\\s+(${t}))?(?=\\s|$)\\s*(.*)$`, 'i'); };
 const AMT = /(?<![\d.,])[-+−]?\(?\d{1,3}(?:[. \u00a0]\d{3})*[,.]\d{2}\)?-?(?:\s?(?:€|EUR))?(?:\s?(?:CR|DB|C|D))?(?![\d,.])/g;
 const AMT_FULL = /^[-+−]?\(?\d{1,3}(?:[. \u00a0]\d{3})*[,.]\d{2}\)?-?(?:\s?(?:€|EUR))?(?:\s?(?:CR|DB|C|D))?$/;
-const DATE_CELL = /^(?:\d{1,2}[-/.]\d{1,2}(?:[-/.]\d{2,4})?|\d{4}-\d{2}-\d{2})$/;
 const lastAmt = (text) => { const m = [...text.matchAll(AMT)]; return m.length ? parseAmount(m[m.length - 1][0], 'comma') : NaN; };
-const p2 = (n) => String(n).padStart(2, '0');
-const ymd = (y, m, d) => `${y}-${p2(m)}-${p2(d)}`;
-const validDay = (y, m, d) => { const t = new Date(Date.UTC(y, m - 1, d)); return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d; };
 const SMALL = new Set(['de', 'da', 'do', 'das', 'dos', 'e', 'a', 'à']);
 const title = (s) => String(s).toLowerCase().split(/\s+/).map((w, i) => (i > 0 && SMALL.has(w) ? w : w.charAt(0).toUpperCase() + w.slice(1))).join(' ');
 const sentence = (s) => { const t = String(s).toLowerCase(); return t.charAt(0).toUpperCase() + t.slice(1); };
-
-// ---------- ruído: cabeçalhos/rodapés de página, «Continua» ----------
-function lineKind(l) {
-  const T = l.text;
-  if (/^EXTRATO\s+N[ºo°.]?\s*\d+/i.test(T) && /P[ÁA]GINA\s+\d+\s*[/de]+\s*\d+/i.test(T)) return 'header';
-  if (/\bCapital Social\b/i.test(T) && /C\.?R\.?C\.?|NIPC|Sede Social/i.test(T)) return 'footer';
-  if (/^P[áa]gina\s+\d+\s*(?:\/|de)\s*\d+\s*$/i.test(T)) return 'footer';
-  if (/^(Continua|Continua[çc][ãa]o)\s*$/i.test(T)) return 'cont';
-  return '';
-}
+const digits = (s) => String(s || '').replace(/\D/g, '');
+const hash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
+const MONRE = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join('|');
 
 // ---------- período, IBAN, nome do produto ----------
-function findPeriod(text) {
-  const D = '(\\d{4}-\\d{2}-\\d{2}|\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4})';
-  const m = text.match(new RegExp(`PER[ÍI]ODO\\s*(?:DE|:)?\\s*${D}\\s*(?:A|AT[ÉE]|-|–|/)\\s*${D}`, 'i'));
-  if (!m) return null;
-  const ini = parseDate(m[1]), fim = parseDate(m[2]);
-  return ini && fim ? { ini, fim } : null;
+function findPeriod(lines) {
+  let best = null, bs = -1;
+  lines.slice(0, 140).forEach((l, i) => {
+    const ds = datesIn(l.text); if (ds.length < 2) return;
+    const between = l.text.slice(ds[0].idx + ds[0].len, ds[1].idx).trim();
+    if (!/^(a|at[ée]|to|until|-|–|—|\/|e|and|al|a)$/i.test(between)) return;
+    if (ds[0].iso > ds[1].iso) return;
+    const sc = (/per[ií]odo|period|from|desde/i.test(l.text) ? 3 : 0) + (/extrato|statement|movimentos/i.test(l.text) ? 1 : 0) + (i < 12 ? 1 : 0) - (l.text.length > 110 ? 3 : 0);
+    if (sc > bs) { bs = sc; best = { ini: ds[0].iso, fim: ds[1].iso }; }
+  });
+  if (best && bs >= 0) return best;
+  const re = new RegExp(`(?:extrato|statement|per[ií]odo|period|movimentos|mes|month)[^\\n]{0,40}?\\b(${MONRE})[a-z]*\\.?\\s+(?:de\\s+)?(20\\d{2})\\b`, 'i');
+  for (const l of lines.slice(0, 60)) {
+    const m = norm(l.text).match(re); if (!m || !MONTHS[m[1]]) continue;
+    const y = +m[2], mo = MONTHS[m[1]], last = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+    return { ini: `${y}-${String(mo).padStart(2, '0')}-01`, fim: `${y}-${String(mo).padStart(2, '0')}-${last}`, mes: true };
+  }
+  return null;
+}
+function yearHintOf(lines, fileName) {
+  const cnt = new Map();
+  for (const l of lines.slice(0, 80)) for (const m of l.text.matchAll(/(?<![\d.,])(20\d{2})(?![\d])/g)) cnt.set(+m[1], (cnt.get(+m[1]) || 0) + 1);
+  const best = [...cnt].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0];
+  if (best) return best[0];
+  const f = String(fileName).match(/(?<!\d)(20\d{2})(?!\d)/); return f ? +f[1] : null;
 }
 function extractMeta(lines, fileName) {
-  const head = lines.filter((l) => lineKind(l) === 'header');
-  let period = null, acctNo = null, extratoNo = null;
+  const head = lines.slice(0, 90);
+  let acctNo = null, extratoNo = null;
   for (const l of head) {
-    period ||= findPeriod(l.text);
-    const a = l.text.match(/CONTA\s+N[ºo°.]*\s*:?\s*(\d[\d.\- ]{6,22}\d)/i); if (a && !acctNo) acctNo = a[1].replace(/\D/g, '');
+    const a = l.text.match(/(?:\bconta|\baccount)\s*(?:n[ºo°.]*|number|no\.?)\s*:?\s*(\d[\d.\- ]{6,22}\d)/i); if (a && !acctNo) acctNo = a[1].replace(/\D/g, '');
     const e = l.text.match(/EXTRATO\s+N[ºo°.]?\s*(\d+)/i); if (e && !extratoNo) extratoNo = e[1];
   }
-  if (!period) for (const l of lines.slice(0, 80)) { period = findPeriod(l.text); if (period) break; }
-  const text80 = lines.slice(0, 80).map((l) => l.text).join('\n');
-  const iban = findIban(text80);
+  const period = findPeriod(lines);
+  const iban = findIban(head.map((l) => l.text).join('\n'));
   let produto = '';
-  const iNib = lines.findIndex((l, i) => i < 80 && /^(N\.?\s?I\.?\s?B\.?\s*:|IBAN\s*:)/i.test(firstCell(l)));
+  const iNib = lines.findIndex((l, i) => i < 90 && /^(N\.?\s?I\.?\s?B\.?\s*:|IBAN\s*:)/i.test(firstCell(l)));
   for (let k = iNib - 1; iNib > 0 && k >= Math.max(0, iNib - 2); k--) {
     const t = firstCell(lines[k]);
     if (/^[A-ZÀ-ÝÇ][A-ZÀ-ÝÇ0-9 .&-]{3,48}$/.test(t) && !/EXTRATO|BANCO|N\.?I\.?B/.test(t)) { produto = t; break; }
   }
   const all = lines.map((l) => l.text).join('\n');
-  return { iban, acctNo, period, extratoNo, produto: produto ? title(produto) : '', bank: detectBank(all.slice(0, 4000) + ' ' + fileName), title: '' };
+  return { iban, acctNo, period, extratoNo, produto: produto ? title(produto) : '', bank: detectBank(all.slice(0, 4000) + ' ' + fileName), yearHint: yearHintOf(lines, fileName) };
 }
 
-// ---------- secções ----------
-const H_CONTA = /^Detalhe de Movimentos d[aeo]s?\s+(.+)$/i; // «…da Conta à Ordem»
+// ---------- regiões: resumo de contas e secções de crédito/empréstimo (hints opcionais) ----------
 const H_LOAN_START = /^Conta Empr[ée]stimo\s*$/i;
 const H_LOAN = /^(?:Empr[ée]stimo|Cr[ée]dito|Financiamento)\s+(.+?)\s+N[úu]mero:?\s*(\d[\d.\- ]*\d)/i;
-const digits = (s) => String(s || '').replace(/\D/g, '');
-
-function splitSections(body) {
-  const secs = [], orphans = []; let cur = null;
-  const open = (tipo, extra = {}) => { cur = { tipo, lines: [], tab: false, ...extra }; secs.push(cur); return cur; };
-  for (const l of body) {
+const H_RESUMO = /^(Resumo das Contas|Resumo de Contas|Account summary|Summary of accounts)/i;
+const H_BACK = /^(detalhe de movimentos d[aeo]s?\s+\S+|conta (à|a) ordem\b|conta poupan|cart[ãa]o\b|poupan[çc]a\b|account (activity|statement)|current account|savings account)/i;
+function classify(lines, hdrAt) {
+  const region = new Array(lines.length).fill('free'); const loans = []; const resumoLines = [];
+  let cur = null; // 'resumo' | loan object
+  lines.forEach((l, i) => {
     const t = firstCell(l); let m;
-    if (/^Resumo das Contas/i.test(t)) { open('resumo'); continue; }
-    if ((m = t.match(H_CONTA)) && !/^\s*$/.test(m[1])) {
-      if (cur && cur.tipo === 'conta' && cur.tab && norm(cur.titulo) === norm(m[1])) continue; // título repetido numa nova página
-      open('conta', { titulo: m[1].trim(), tab: true }); continue;
-    }
-    if (H_LOAN_START.test(t)) { open('emprestimo', { pend: true }); continue; }
-    if ((m = t.match(H_LOAN))) {
+    if (H_RESUMO.test(t)) { cur = 'resumo'; }
+    else if (H_LOAN_START.test(t)) { cur = { pend: true, lines: [] }; loans.push(cur); }
+    else if ((m = t.match(H_LOAN))) {
       const num = digits(m[2]);
-      if (cur && cur.tipo === 'emprestimo' && (cur.pend || cur.numero === num)) { cur.pend = false; cur.produto = m[1].trim(); cur.numero = num; cur.numeroTxt = m[2].trim(); }
-      else open('emprestimo', { produto: m[1].trim(), numero: num, numeroTxt: m[2].trim() });
-      cur.lines.push(l); continue;
-    }
-    (cur ? cur.lines : orphans).push(l);
-  }
-  return { secs, orphans };
+      if (cur && cur !== 'resumo' && (cur.pend || cur.numero === num)) { cur.pend = false; cur.produto = m[1].trim(); cur.numero = num; cur.numeroTxt = m[2].trim(); }
+      else { cur = { produto: m[1].trim(), numero: num, numeroTxt: m[2].trim(), lines: [] }; loans.push(cur); }
+    } else if (cur && H_BACK.test(t) && !l.nAmt && [...Array(9).keys()].some((k) => hdrAt.has(i + k))) cur = null;
+    if (cur === 'resumo') { region[i] = 'resumo'; resumoLines.push(l); }
+    else if (cur) { region[i] = 'loan'; cur.lines.push(l); }
+  });
+  return { region, loans: loans.filter((x) => !x.pend), resumoLines };
 }
-
-// ---------- datas «dd-mm» sem ano ----------
-function resolveDate(tok, period, order = 'dmy') {
-  const s = tok.trim();
-  const sm = s.match(/^(\d{1,2})[-/.](\d{1,2})$/);
-  if (!sm) return parseDate(s, order);
-  const d = order === 'mdy' ? +sm[2] : +sm[1], mo = order === 'mdy' ? +sm[1] : +sm[2];
-  if (!period) return null;
-  const ys = [...new Set([+period.ini.slice(0, 4), +period.fim.slice(0, 4)])];
-  let best = null, bd = Infinity;
-  for (const y of ys) {
-    if (!validDay(y, mo, d)) continue;
-    const iso = ymd(y, mo, d);
-    const dist = iso < period.ini ? (new Date(period.ini) - new Date(iso)) : iso > period.fim ? (new Date(iso) - new Date(period.fim)) : 0;
-    if (dist < bd) { bd = dist; best = iso; }
-  }
-  return best;
-}
-
-// ---------- tabela de movimentos de uma conta ----------
-function findAnchors(l) {
-  const cs = (l.cells || []).map((c) => ({ ...c, n: hclean(c.s) }));
-  const d = cs.find((c) => /^(debito|debit)\b/.test(c.n)), c = cs.find((x) => /^(credito|credit)\b/.test(x.n));
-  const v = [...cs].reverse().find((x) => /^(valor|montante|importe|quantia|amount)$/.test(x.n));
-  const s = cs.find((x) => /^saldo\b|^balance\b/.test(x.n));
-  const mid = (x) => (x ? (x.x + x.x2) / 2 : null);
-  if (d && c) return { debito: mid(d), credito: mid(c), saldo: mid(s) };
-  if (v && s) return { valor: mid(v), saldo: mid(s) };
-  return null;
-}
-const explicitSign = (s) => /^[-+−(]/.test(s.trim()) || /[-)]\s*(?:€|EUR)?$/.test(s.trim()) || /(?:CR|DB|C|D)$/i.test(s.trim());
-
-function parseTable(sec, ctx) {
-  const rowRe = rowDateRe(!!ctx.period);
-  let anchors = null, tab = !!(sec.tab || sec.implicit), last = null;
-  let opening = null, final = null, disp = null;
-  const raw = [], allAmts = []; let ignoradas = 0;
-  for (const l of sec.lines) {
-    const T = l.text;
-    if (!anchors && tab) anchors = findAnchors(l);
-    if (tab && /^Saldo\s+(?:inicial|anterior|transportado)\b/i.test(T) && opening == null) { const v = lastAmt(T); if (!Number.isNaN(v)) { opening = v; last = null; continue; } }
-    if (/^Saldo\s+(?:contabil[ií]stico\s+final|final)\b/i.test(T) && final == null) { const v = lastAmt(T); if (!Number.isNaN(v)) { final = v; tab = false; last = null; continue; } }
-    if (/^Saldo\s+dispon[ií]vel\s+final\b/i.test(T)) { const v = lastAmt(T); if (!Number.isNaN(v)) disp = v; continue; }
-    if (!tab) continue;
-    const m = T.match(rowRe);
-    if (!m) {
-      if (last && !last.cont && l.text.length <= 60 && !/saldo|p[aá]gina|total|extrato|iban|nib|d[ée]bito|cr[ée]dito|descritivo/i.test(T) && !(T.match(AMT) || []).length && !DATE_CELL.test(firstCell(l))
-        && (last.descX == null || !l.cells?.[0] || Math.abs(l.cells[0].x - last.descX) <= 8)) { last.desc += ' ' + T.trim(); last.cont = true; }
-      continue;
-    }
-    const rest = m[3];
-    const ms = [...rest.matchAll(AMT)];
-    const tail = [];
-    for (let i = ms.length - 1; i >= 0; i--) {
-      const after = rest.slice(ms[i].index + ms[i][0].length, i === ms.length - 1 ? undefined : ms[i + 1].index);
-      if (/^\s*$/.test(after)) tail.unshift(ms[i]); else break;
-    }
-    if (!tail.length) { last = null; ignoradas++; continue; }
-    const desc = rest.slice(0, tail[0].index).replace(/\s+/g, ' ').replace(/\s+(?:EUR|EURO)$/i, '').trim();
-    const cells = l.cells || [];
-    const tcells = []; for (let i = cells.length - 1; i >= 0 && AMT_FULL.test(cells[i].s.trim()); i--) tcells.unshift(cells[i]);
-    const xs = tcells.length === tail.length ? tcells.map((c) => (c.x + c.x2) / 2) : null;
-    const items = tail.map((t, i) => ({ s: t[0], x: xs ? xs[i] : null }));
-    const dc = cells.find((c) => !DATE_CELL.test(c.s.trim()));
-    raw.push({ tok: m[1], desc, items, cont: false, descX: dc ? dc.x : null, page: l.page });
-    last = raw[raw.length - 1];
-    for (const it of items) allAmts.push(it.s);
-  }
-  const style = 'comma';
-  const rows = []; let unsigned = 0;
-  for (const r of raw) {
-    const data = resolveDate(r.tok, ctx.period);
-    if (!data) continue;
-    const nums = r.items.map((it) => ({ ...it, v: parseAmount(it.s, style) })).filter((it) => !Number.isNaN(it.v));
-    if (!nums.length) continue;
-    let valor = null, saldo = null, certo = false;
-    if (anchors && nums.every((n) => n.x != null)) {
-      const cand = ['debito', 'credito', 'valor', 'saldo'].filter((k) => anchors[k] != null);
-      const near = (x) => cand.slice().sort((a, b) => Math.abs(anchors[a] - x) - Math.abs(anchors[b] - x))[0];
-      let d = 0, c = 0, v = 0, has = false;
-      for (const n of nums) { const k = near(n.x); if (k === 'saldo') saldo = n.v; else if (k === 'debito') { d += Math.abs(n.v); has = true; } else if (k === 'credito') { c += Math.abs(n.v); has = true; } else { v += n.v; has = true; } }
-      if (has) { valor = c - d + v; certo = true; }
-    }
-    if (valor == null) {
-      if (nums.length >= 2) { saldo = nums[nums.length - 1].v; const a = nums[nums.length - 2]; valor = a.v; certo = explicitSign(a.s); } else { valor = nums[0].v; certo = explicitSign(nums[0].s); }
-    }
-    if (valor === 0) continue;
-    rows.push({ data, desc: r.desc, valor, saldo, contaKey: '', contaLabel: '', semSinal: !certo, pagina: r.page });
-    if (!certo) unsigned++;
-  }
-  const chain = validateChain(rows, opening);
-  const warnings = [];
-  const still = rows.filter((r) => r.semSinal).length;
-  if (still) warnings.push(`Em ${still} linha(s) não foi possível determinar se é entrada ou saída (assumida saída) — confirme na revisão.`);
-  for (const r of rows) if (r.semSinal) r.valor = -Math.abs(r.valor);
-  if (chain.fixed) warnings.push(`Corrigi o sinal (entrada/saída) de ${chain.fixed} movimento${chain.fixed === 1 ? '' : 's'} com base na coluna de saldos do extrato.`);
-  if (chain.inferidos) warnings.push(`O sinal de ${chain.inferidos} movimento${chain.inferidos === 1 ? '' : 's'} foi deduzido pela coluna de saldos.`);
-  if (chain.broken) warnings.push(`${chain.broken} movimento${chain.broken === 1 ? '' : 's'} não bate${chain.broken === 1 ? '' : 'm'} certo com a coluna de saldos do extrato (pode faltar uma linha ou um valor foi mal lido).`);
-  const soma = rows.reduce((a, r) => a + r.valor, 0);
-  return { rows, opening, final, disp, anchors, chain, soma, ignoradas, warnings };
-}
-
 // ---------- créditos / empréstimos ----------
 const pctNum = (s) => { const m = String(s || '').match(/(\d+(?:[.,]\d+)?)\s*%/); return m ? parseFloat(m[1].replace(',', '.')) : null; };
 function parseLoan(sec, ctx) {
@@ -233,9 +134,9 @@ function parseLoan(sec, ctx) {
 }
 
 // ---------- resumo das contas (verificação cruzada) ----------
-function parseResumo(sec) {
+function parseResumo(lines) {
   let prev = '', dep = null, resp = null;
-  for (const l of sec.lines) {
+  for (const l of lines) {
     const isTotal = /^TOTAL\b/i.test(firstCell(l)) || /^\s*TOTAL\s+-?\d/i.test(l.text);
     if (isTotal) { const v = lastAmt(l.text); if (!Number.isNaN(v)) { if (/DEP[ÓO]SITOS?/i.test(prev) && dep == null) dep = v; else if (/RESPONSABILIDADES|CR[ÉE]DITO|EMPR[ÉE]STIMO/i.test(prev) && resp == null) resp = v; } continue; }
     if (!Number.isNaN(lastAmt(l.text))) prev = l.text;
@@ -243,52 +144,121 @@ function parseResumo(sec) {
   return { depositos: dep, responsabilidades: resp };
 }
 
+// ---------- identidade e título de uma tabela (linhas antes do cabeçalho) ----------
+const GENERIC_TITLE = /^(extrato|movimentos|statement|account (activity|statement)|transactions?|detalhe de movimentos)\b/i;
+function sectionInfo(sec) {
+  const pre = sec.pre.slice(-12);
+  const head = [...pre].reverse().find((l) => isHeading(l) && !/\d{4}|\*{2}/.test(l.text));
+  let titulo = head ? head.text.trim().replace(/^detalhe de movimentos\s+d[aeo]s?\s+/i, '').replace(/\s{2,}.*$/, '') : '';
+  if (GENERIC_TITLE.test(titulo) || /\d{6,}|\biban\b|\bPT\d{2}\b/i.test(titulo)) titulo = '';
+  const txt = pre.map((l) => l.text).join('\n');
+  const iban = findIban(txt);
+  const a = txt.match(/\b(\d{4}\.\d{11})\b/) || txt.match(/(?:\bconta|\baccount)\s*(?:n[ºo°.]*|number|no\.?)\s*:?\s*(\d[\d.\- ]{6,22}\d)/i);
+  const card = (txt.match(/(?:cart[ãa]o|card)[^\n\d]{0,30}(?:[\d*•xX.\-\s]{0,24}?)(\d{4})\b/i) || txt.match(/\*{2,}\s?(\d{4})\b/) || [])[1] || null;
+  return { titulo, iban, acctNo: a ? digits(a[1]) : null, card, ctx: pre.filter((l) => isHeading(l)).map((l) => l.text).join(' ') };
+}
+
+// ---------- confiança ----------
+function confidence({ metodo, nRows, chains, recon, semSinal, dropped, ocr }) {
+  const motivos = []; let pts = metodo === 'cabecalho' ? 55 : metodo === 'heuristica' ? 45 : 50;
+  if (!nRows) return { nivel: 'baixa', pontos: 0, motivos: ['Não encontrei movimentos.'] };
+  if (metodo === 'heuristica') motivos.push('Não encontrei um cabeçalho de tabela; usei linhas com data e valor.');
+  const ck = chains.reduce((a, c) => a + c.checked, 0), ok = chains.reduce((a, c) => a + c.ok + c.fixed, 0);
+  if (ck >= 3) { const r = ok / ck; if (r >= 0.95) { pts += 30; motivos.push('A coluna de saldos confirma os valores.'); } else if (r >= 0.8) pts += 12; else { pts -= 25; motivos.push('A coluna de saldos não bate certo em várias linhas.'); } }
+  if (recon.n) { if (recon.bad) { pts -= 30; motivos.push('A soma dos movimentos não fecha com os saldos do extrato.'); } else { pts += 25; motivos.push('A soma fecha com o saldo inicial e final do extrato.'); } }
+  const ss = semSinal / nRows; if (ss > 0.5) { pts -= 35; motivos.push('Não consegui perceber o sinal (entrada/saída) da maioria das linhas.'); } else if (ss > 0.25) pts -= 12; else if (semSinal) pts -= 2;
+  if (dropped / (nRows + dropped) > 0.15) { pts -= 20; motivos.push('Várias linhas ficaram sem data válida.'); }
+  if (nRows < 3) pts -= 15;
+  let nivel = pts >= 70 ? 'alta' : pts >= 45 ? 'media' : 'baixa';
+  if (ocr && nivel === 'alta') { nivel = 'media'; motivos.push('Texto lido por OCR (reconhecimento ótico): melhor esforço.'); }
+  return { nivel, pontos: pts, motivos };
+}
+
+// ---------- impressões digitais (layout memorizado) ----------
+const MASK = new RegExp(`\\b(${MONRE})[a-z]*\\b`, 'g');
+function fingerprints(lines, meta, hdrs, ocr) {
+  const fps = []; const pfx = (meta.iban || '').slice(0, 8);
+  const h = hdrs[0];
+  if (h) { const k = hash(h.labels + (ocr ? '|ocr' : '')); if (pfx) fps.push(`h:${k}|${pfx}`); fps.push(`h:${k}`); }
+  const top = lines.filter((l) => l.page === (lines[0]?.page ?? 1)).slice(0, 4).map((l) => norm(l.text).replace(MASK, 'M').replace(/\d/g, '9').replace(/\s+/g, ' ').slice(0, 60)).join('~');
+  fps.push(`t:${hash(top + (meta.bank?.id || '') + (ocr ? '|ocr' : ''))}`);
+  return fps;
+}
+
 // ---------- entrada principal ----------
-export function parseStatementLines(lines, fileName = '') {
+// opts: { layout (manual), layouts (memorizados: { fp: layout }), implicit, ocr, today }
+export function parseStatementLines(lines, fileName = '', opts = {}) {
+  prepare(lines);
   const meta = extractMeta(lines, fileName);
-  const body = lines.filter((l) => !lineKind(l));
-  const { secs, orphans } = splitSections(body);
-  const ctx = { period: meta.period };
+  const hdrAt0 = findHeaders(lines);
+  const { region, loans, resumoLines } = classify(lines, hdrAt0);
   const warnings = [];
-  const contas = secs.filter((s) => s.tipo === 'conta');
-  if (!contas.length) { // PDF «simples»: toda a página é uma tabela (sem secções reconhecidas)
-    const lines2 = [...orphans, ...secs.filter((s) => s.tipo === 'resumo').flatMap((s) => s.lines)];
-    contas.push({ tipo: 'conta', titulo: '', implicit: true, tab: true, lines: lines2 });
+  const period = meta.period;
+  const run = (o) => extractSections(lines, { region, ...o });
+  let layout = opts.layout || null, usadoGuardado = null;
+  const hdrs0 = [...hdrAt0.values()];
+  const fps0 = fingerprints(lines, meta, hdrs0, !!opts.ocr);
+  if (!layout && opts.layouts) { const k = fps0.find((f) => opts.layouts[f]); if (k) { layout = opts.layouts[k]; usadoGuardado = k; } }
+  let metodo = layout ? (opts.layout ? 'manual' : 'guardado') : 'cabecalho';
+  let ex = run({ layout });
+  let withRows = ex.sections.filter((s) => s.raw.length);
+  if (!layout && withRows.reduce((a, x) => a + x.raw.length, 0) < 3) { // cabeçalho não reconhecido (ou quase sem linhas): tentar linhas com data + valor
+    const ex2 = run({ implicit: true }); const w2 = ex2.sections.filter((s) => s.raw.length);
+    if (w2.reduce((a, x) => a + x.raw.length, 0) > withRows.reduce((a, x) => a + x.raw.length, 0)) { ex = ex2; withRows = w2; metodo = 'heuristica'; }
   }
-  const rows = [], accounts = {}, secoes = [];
-  let anchors = false;
-  for (const s of contas) {
-    const t = parseTable(s, ctx);
-    anchors ||= !!t.anchors;
-    const own = digits((s.lines.slice(0, 4).map((l) => l.text).join(' ').match(/\b\d{4}\.\d{11}\b/) || [''])[0]);
-    const main = !own || (meta.acctNo && (meta.acctNo === own || meta.acctNo.endsWith(own) || own.endsWith(meta.acctNo)));
-    const key = main ? (meta.iban || '') : 'conta:' + own;
-    const tipo = guessAccountType(s.titulo || '');
-    const nome = main ? (meta.produto || (s.titulo && !/ordem/i.test(s.titulo) ? s.titulo : '')) : title(s.titulo || '');
-    for (const r of t.rows) { r.contaKey = key; r.contaLabel = key.startsWith('conta:') ? (nome || 'Conta ' + own) : ''; rows.push(r); }
+  const yearOf = makeYearOf({ period, today: opts.today });
+
+  // identidade de cada secção
+  const infos = withRows.map((s) => ({ sec: s, ...sectionInfo(s) }));
+  const matches = (i) => (i.iban && meta.iban && i.iban === meta.iban) || (i.acctNo && meta.acctNo && (meta.acctNo.endsWith(i.acctNo) || i.acctNo.endsWith(meta.acctNo)));
+  let mainIdx = infos.length === 1 ? 0 : infos.findIndex(matches);
+  if (mainIdx < 0 && infos.length > 1) { const free = infos.filter((i) => !i.iban && !i.acctNo && !i.card); if (free.length === 1) mainIdx = infos.indexOf(free[0]); }
+  const rows = [], accounts = {}, secoes = [], chains = [];
+  let semSinalTot = 0, dropped = 0, reconN = 0, reconBad = 0;
+  // ordem de datas e ano: dependem de todos os tokens
+  const order = ex.order;
+  infos.forEach((info, idx) => {
+    const s = info.sec;
+    const tipo = layout?.tipo || guessAccountType(info.ctx);
+    const monthsOf = s.raw.map((r) => r.tokMov).filter(Boolean).map((t) => (order === 'mdy' && (t.kind === 'num' || t.kind === 'short') ? +t.g[0] : t.kind === 'iso' ? +t.g[1] : t.kind === 'mond' ? MONTHS[t.g[0]] : t.kind === 'dmon' ? MONTHS[t.g[1]] : +t.g[1]));
+    const yo = period ? yearOf : makeYearOf({ yearHint: meta.yearHint, months: monthsOf, today: opts.today });
+    const t = concludeSection(s, { order, yearOf: yo, tipo, layout });
+    dropped += t.dropped;
+    if (!t.rows.length) return;
+    const main = idx === mainIdx || (infos.length === 1);
+    const key = main ? (meta.iban || (info.iban && !meta.iban ? info.iban : '')) : (info.iban || (info.acctNo && 'conta:' + info.acctNo) || (info.card && 'cartao:' + info.card) || 'sec:' + (norm(info.titulo).replace(/[^a-z0-9]+/g, '-') || String(idx + 1)));
+    const nome = main ? (meta.produto || (info.titulo && !/ordem/i.test(info.titulo) ? title(info.titulo) : '')) : title(info.titulo || '');
+    const label = key.startsWith('conta:') || key.startsWith('cartao:') || key.startsWith('sec:') ? (nome || (key.startsWith('cartao:') ? 'Cartão …' + info.card : 'Conta ' + (info.acctNo || ''))) : '';
+    for (const r of t.rows) { r.contaKey = key; r.contaLabel = label; r.secId = idx; rows.push(r); }
+    semSinalTot += t.rows.filter((r) => r.semSinal).length;
+    let opening = s.opening, final = s.final;
+    const soma = t.soma;
+    if (tipo === 'cartao' && opening != null && final != null && final - (opening + soma) !== 0 && -final - (-opening + soma) === 0) { opening = -opening; final = -final; } // saldos «em dívida» no cartão
+    const periodo = period || { ini: t.rows.map((r) => r.data).sort()[0], fim: t.rows.map((r) => r.data).sort().pop() };
     const prevA = accounts[key];
-    const periodo = ctx.period || (t.rows.length ? { ini: t.rows.map((r) => r.data).sort()[0], fim: t.rows.map((r) => r.data).sort().pop() } : null);
-    if (prevA && t.rows.length === 0) continue; // título repetido sem movimentos
-    accounts[key] = {
-      key, iban: key === meta.iban ? meta.iban : null, acctNo: main ? meta.acctNo : own, label: nome, nome: nome || null, tipo,
-      opening: t.opening, final: t.final, disp: t.disp, periodo, chain: t.chain, soma: t.soma,
-      ledger: t.final != null && t.opening == null ? { valor: t.final, data: periodo?.fim || null } : null,
+    const acc = {
+      key, iban: key === meta.iban ? meta.iban : (/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(key) ? key : null), acctNo: main ? meta.acctNo : info.acctNo, label: nome, nome: nome || null, tipo,
+      opening, final, disp: s.disp, periodo, chain: t.chain, soma, ledger: final != null && opening == null ? { valor: final, data: periodo?.fim || null } : null, secId: idx,
     };
-    if (t.opening != null && t.final != null) {
-      const diff = t.final - (t.opening + t.soma);
-      accounts[key].diffExtrato = diff;
-      if (diff !== 0) warnings.push(`A soma dos movimentos lidos não fecha com os saldos do extrato (diferença ${(diff / 100).toFixed(2).replace('.', ',')} €).`);
+    if (prevA) { // mesma conta noutra tabela: juntar
+      prevA.soma += soma; if (prevA.opening == null) prevA.opening = opening; if (final != null) prevA.final = final; if (prevA.opening != null && prevA.final != null) prevA.diffExtrato = prevA.final - (prevA.opening + prevA.soma);
+    } else accounts[key] = acc;
+    const A = accounts[key];
+    if (A.opening != null && A.final != null && !prevA) {
+      const diff = A.final - (A.opening + A.soma); A.diffExtrato = diff; reconN++;
+      if (diff !== 0) { reconBad++; warnings.push(`A soma dos movimentos lidos não fecha com os saldos do extrato (diferença ${(diff / 100).toFixed(2).replace('.', ',')} €).`); }
     }
+    chains.push({ checked: t.chain.checked || 0, ok: t.chain.ok || 0, fixed: t.chain.fixed || 0 });
     for (const w of t.warnings) warnings.push(w);
-    secoes.push({ tipo: 'conta', titulo: s.titulo || meta.produto || 'Movimentos', n: t.rows.length, key });
-  }
+    secoes.push({ tipo: 'conta', titulo: info.titulo || nome || meta.produto || 'Movimentos', n: t.rows.length, key, tipoConta: tipo });
+  });
+
   const debts = [];
-  for (const s of secs.filter((x) => x.tipo === 'emprestimo')) {
-    const d = parseLoan(s, ctx); if (!d) continue;
+  for (const L of loans) {
+    const d = parseLoan({ lines: L.lines, produto: L.produto, numero: L.numero, numeroTxt: L.numeroTxt }, { period }); if (!d) continue;
     debts.push(d); secoes.push({ tipo: 'emprestimo', titulo: `${d.produto} …${digits(d.numero).slice(-4)}`, n: 0 });
   }
-  const resumoSec = secs.find((s) => s.tipo === 'resumo');
-  const resumo = resumoSec ? parseResumo(resumoSec) : null;
+  const resumo = resumoLines.length ? parseResumo(resumoLines) : null;
   if (resumo) {
     const dep = Object.values(accounts).reduce((a, x) => a + (x.final ?? 0), 0);
     if (resumo.depositos != null && Object.values(accounts).some((x) => x.final != null) && dep !== resumo.depositos) warnings.push('O «Resumo das Contas» indica um total de depósitos diferente da soma dos saldos finais das contas lidas — pode haver contas no extrato que não foram reconhecidas.');
@@ -296,11 +266,54 @@ export function parseStatementLines(lines, fileName = '') {
     if (resumo.responsabilidades != null && debts.length && Math.abs(resumo.responsabilidades) !== resp) warnings.push('A soma dos créditos detetados não coincide com as «Responsabilidades» do Resumo das Contas — confirme os valores das dívidas.');
   }
   const primeira = Object.values(accounts)[0];
-  const moedas = contas.map((s) => s.lines.slice(0, 3).map((l) => l.text).join(' ').match(/Moeda:\s*([A-Z]{3})/)?.[1]).filter((m) => m && m !== 'EUR');
+  const moedas = [...new Set(lines.map((l) => (l.text.match(/Moeda:\s*([A-Z]{3})/) || [])[1]).filter((m) => m && m !== 'EUR'))];
   if (moedas.length) warnings.push(`Uma secção está em ${moedas[0]} (não EUR): confirme os valores.`);
+  const txtDoc = lines.slice(0, 200).map((l) => l.text).join(' ');
+  if (!moedas.length && /\b(USD|GBP|CHF)\b|\$\s?\d|£\s?\d/.test(txtDoc) && !/\bEUR\b|€/.test(txtDoc)) warnings.push('O extrato parece estar noutra moeda que não EUR: confirme os valores.');
+  const conf = confidence({ metodo, nRows: rows.length, chains, recon: { n: reconN, bad: reconBad }, semSinal: semSinalTot, dropped, ocr: !!opts.ocr });
+  const first = withRows[0];
+  const layoutOut = first?.cols ? { v: 1, cols: layoutFromCols(first.cols, ex.pw), dateFmt: layout?.dateFmt || 'auto', useValueDate: !!layout?.useValueDate, invert: !!layout?.invert, skip: layout?.skip || [] } : null;
   return {
-    rows, meta: { iban: meta.iban, acctNo: meta.acctNo, bank: meta.bank, title: meta.produto }, warnings, ignored: [], anchors,
-    accounts, debts, secoes, resumo, periodo: meta.period, extratoNo: meta.extratoNo, consolidado: secs.length > 0,
-    chain: primeira?.chain || null,
+    rows, meta: { iban: meta.iban, acctNo: meta.acctNo, bank: meta.bank, title: meta.produto }, warnings, ignored: [], anchors: !!(first?.hdr), accounts, debts, secoes, resumo,
+    periodo: period, extratoNo: meta.extratoNo, consolidado: secoes.length > 1 || debts.length > 0 || !!resumo, chain: primeira?.chain || null,
+    confianca: conf, metodo, usadoGuardado, layout: layoutOut, fingerprints: fps0, ordemDatas: order, ocr: !!opts.ocr, nIgnoradas: dropped,
   };
+}
+
+// ---------- apoio ao passo «Ajustar leitura do PDF» ----------
+// Quantas linhas parecem movimentos (data no início + valor) e se há cabeçalho de tabela: distingue «extrato difícil» de «não é um extrato».
+export function surveyLines(lines) {
+  prepare(lines);
+  return { linhas: lines.length, candidatas: lines.filter((l) => l.isRow).length, cabecalhos: findHeaders(lines).size, chars: lines.reduce((a, l) => a + l.text.length, 0) };
+}
+// Layout inicial para ajustar à mão: o detetado, ou colunas deduzidas das linhas com data+valor
+export function defaultLayout(lines, parsed = null) {
+  if (parsed?.layout?.cols?.length) return JSON.parse(JSON.stringify(parsed.layout));
+  const { pw } = prepare(lines);
+  const ex = extractSections(lines, { implicit: true });
+  const sec = ex.sections.find((x) => x.cols);
+  if (!sec) return null;
+  return { v: 1, cols: layoutFromCols(sec.cols, pw), dateFmt: 'auto', useValueDate: false, invert: false, skip: [] };
+}
+// Pré-visualização: linhas a partir de ~4 antes da primeira linha de movimento, com as células distribuídas pelas colunas do layout
+export function previewLines(lines, layout, max = 80) {
+  const { pw } = prepare(lines);
+  const cols = (layout?.cols || []).map((c) => ({ ...c, x1: c.x1 * pw, x2: c.x2 * pw }));
+  const first = lines.findIndex((l) => l.isRow);
+  const start = Math.max(0, first < 0 ? 0 : first - 4);
+  const skip = new Set(layout?.skip || []);
+  const out = [];
+  for (let i = start; i < lines.length && out.length < max; i++) {
+    const L = lines[i]; L.sig = L.sig || sigOf(L);
+    const cells = cols.map(() => '');
+    if (L.isRow || L.nAmt) {
+      for (const c of L.cells || [{ s: L.text, x1: 0, x2: pw }]) {
+        let bi = -1, bd = 1e9; const mx = (c.x1 + c.x2) / 2;
+        cols.forEach((k, j) => { const d = mx >= k.x1 && mx <= k.x2 ? 0 : Math.min(Math.abs(mx - k.x1), Math.abs(mx - k.x2)); if (d < bd) { bd = d; bi = j; } });
+        if (bi >= 0) cells[bi] = (cells[bi] ? cells[bi] + ' ' : '') + c.s.trim();
+      }
+    }
+    out.push({ i, page: L.page, sig: L.sig, text: L.text, isRow: !!L.isRow, cells: L.isRow || L.nAmt ? cells : null, skip: skip.has(L.sig) });
+  }
+  return out;
 }
