@@ -34,5 +34,39 @@
   "n": 5,
   "abertura": 120000,
   "final": 251255
+ },
+ "consolidado": {
+  "iban": "PT50999900000000000000051",
+  "nome": "Conta Exemplo Plus",
+  "nov": {
+   "n": 38,
+   "abertura": 250,
+   "final": 75106,
+   "soma": 74856,
+   "entradas": 9,
+   "saidas": 29,
+   "dividas": [
+    {
+     "ref": "0000.00000000071",
+     "saldo": 280000,
+     "total": 400000,
+     "taxa": 9,
+     "prestacao": 12000
+    },
+    {
+     "ref": "0000.00000000072",
+     "saldo": 140000,
+     "total": 200000,
+     "taxa": 8,
+     "prestacao": 9000
+    }
+   ]
+  },
+  "dez": {
+   "n": 12,
+   "abertura": 75106,
+   "final": 229967,
+   "soma": 154861
+  }
  }
 }

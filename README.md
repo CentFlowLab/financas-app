@@ -46,7 +46,7 @@ Painel, Contas, Movimentos e Definições têm um botão **Importar extrato** (t
 ### Limitações (honestas)
 - **Nenhum extrato real foi usado nos testes**; só ficheiros fictícios gerados em `tests/fixtures` (`npm run fixtures`).
 - **Layouts de bancos** (CGD, Millennium bcp, Novo Banco, Santander, BPI, ActivoBank, Moey, Montepio, Revolut, N26, Trade Republic, Wise) são heurísticas genéricas por nome de coluna; não são formatos oficiais confirmados. Se o mapeamento automático falhar, ajuste no passo «Colunas».
-- **PDF**: cada banco tem um desenho diferente; datas sem ano, tabelas multilinha e PDFs digitalizados não são suportados; o sinal entrada/saída é deduzido (colunas Débito/Crédito, sinais ou cadeia de saldos) e pode precisar de correção.
+- **PDF**: cada banco tem um desenho diferente; PDFs digitalizados e tabelas multilinha complexas não são suportados. Extratos *consolidados* (vários produtos) são lidos por secções (`js/import/pdfstatement.js`): só as tabelas «Detalhe de Movimentos da Conta…» viram movimentos (datas «dd-mm» completadas com o ano do período; «Saldo Inicial»/«Saldo Final» do próprio extrato; sinais validados/corrigidos pela cadeia de saldos); créditos/empréstimos são sugeridos como dívidas (opcional); avisos, resumos e rodapés são ignorados. Vários extratos consecutivos da mesma conta (reconhecida por IBAN) acumulam-se sem alterar o saldo inicial e com verificação do saldo de abertura.
 - Transferências só são emparelhadas dentro da mesma importação; moedas que não EUR só geram aviso; cabeçalhos de várias linhas não são suportados; a deteção de duplicados exige a mesma data.
 - Anular uma importação mantém a conta criada se já tiver movimentos de outra origem.
 
@@ -91,7 +91,7 @@ public/                 código-fonte da app (HTML/CSS/JS sem framework)
   js/model.js           saldos, dívidas, combustível, garantias, preços
   js/modules/*.js       um ficheiro por separador
   js/modules/importar.js  assistente de importação de extratos
-  js/import/              parse.js (CSV/OFX/QIF/PDF, números, datas, IBAN), categorize.js,
+  js/import/              parse.js (CSV/OFX/QIF, números, datas, IBAN), pdfstatement.js (PDF por secções), categorize.js,
                           loaders.js (SheetJS, pdf.js), engine.js (contas, duplicados, transferências, gravar/anular), sample.js
   js/ocr.js, receipt-parser.js, image.js, charts.js, ui.js, util.js, demo.js
   vendor/tesseract/     motor OCR + dados de português (local, funciona offline)

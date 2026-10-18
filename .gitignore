@@ -5,3 +5,11 @@ dist/
 .env
 test-results/
 playwright-report/
+
+# Dados reais/privados: nunca commitar extratos reais
+*real*.pdf
+extrato-*-real*
+extrato.txt
+/uploads/
+/scratch/
+*.real.*

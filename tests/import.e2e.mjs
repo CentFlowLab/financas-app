@@ -21,7 +21,7 @@ page.on('console', (m) => { if (['error', 'warning'].includes(m.type())) errors.
 page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
 const T = (sel) => page.locator(sel).first().innerText().then(norm);
 const go = async (h) => { await page.evaluate((x) => (location.hash = x), h); await page.waitForTimeout(200); };
-const state = () => page.evaluate(async () => { const { S } = await import('./js/db.js'); return JSON.parse(JSON.stringify({ accounts: S.accounts, movements: S.movements, imports: S.imports, catRules: S.catRules, meta: S.meta })); });
+const state = () => page.evaluate(async () => { const { S } = await import('./js/db.js'); return JSON.parse(JSON.stringify({ accounts: S.accounts, movements: S.movements, imports: S.imports, catRules: S.catRules, debts: S.debts, meta: S.meta })); });
 const waitStep = (s) => page.waitForSelector(`#imp-body[data-step=${s}]`, { timeout: 15000 });
 const openImport = async () => { await go('#/importar?novo=1'); await waitStep('ficheiro'); };
 const upload = async (file) => { await page.setInputFiles('#imp-file', file); };
@@ -386,6 +386,138 @@ await page.selectOption('select[name=o-encoding]', 'utf-8');
 ok((await T('#imp-body')).includes('FARM\uFFFDCIA') || (await T('#imp-preview')).includes('\uFFFD'), 'forçar UTF-8 num ficheiro Windows-1252 mostra caracteres inválidos (�)');
 await page.selectOption('select[name=o-encoding]', 'windows-1252');
 ok(!(await T('#imp-preview')).includes('\uFFFD') && (await T('#imp-preview')).includes('FARMÁCIA'), 'escolher Windows-1252 corrige os acentos');
+
+console.log('\n== PDF consolidado (sintético): secções, cadeia de saldos, créditos ==');
+const CX = EXP.consolidado;
+const consolidated = (name) => page.evaluate(async ({ name, b64 }) => {
+  const E = await import('./js/import/engine.js');
+  const src = await E.loadSource(new File([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], name));
+  const sess = E.buildSession(src); const g = sess.groups[0]; const rec = E.reconcile(g);
+  const p = src.parsed;
+  return { n: p.rows.length, soma: p.rows.reduce((a, r) => a + r.valor, 0), semSinal: p.rows.filter((r) => r.semSinal).length, quebradas: p.rows.filter((r) => r.cadeia === 'quebrada').length,
+    datas: [p.rows.map((r) => r.data).sort()[0], p.rows.map((r) => r.data).sort().pop()], nGroups: sess.groups.length, g: { nome: g.novo.nome, iban: g.iban, opening: g.bal.opening, final: g.bal.final, tipo: g.novo.tipo, explicito: g.bal.explicito },
+    rec: { diff: rec.diff, calculado: rec.calculado }, warnings: p.warnings, debts: sess.debts.map((d) => ({ ref: d.ref, saldo: d.saldoAtual, total: d.total, taxa: d.taxa, prestacao: d.prestacao, checked: d.checked, credor: d.credor })), secoes: p.secoes, resumo: p.resumo,
+    descs: p.rows.map((r) => r.desc), chain: p.accounts[g.key].chain, periodo: p.periodo };
+}, { name, b64: readFileSync(FX(name)).toString('base64') });
+{
+  const r = await consolidated('extrato-consolidado-nov.pdf');
+  eq(r.n, CX.nov.n, `só os ${CX.nov.n} movimentos da conta à ordem (avisos, resumo, créditos e rodapés ignorados)`);
+  eq(r.nGroups, 1, 'uma só conta (os créditos não viram contas)');
+  eq(r.datas.join('→'), '2026-11-02→2026-11-30', 'datas «dd-mm» completadas com o ano do período; período dentro de novembro');
+  eq(r.g.opening, CX.nov.abertura, 'saldo inicial vem de «Saldo Inicial» (2,50 €)'); eq(r.g.final, CX.nov.final, 'saldo final vem de «Saldo Contabilístico Final»');
+  eq(r.soma, CX.nov.soma, 'soma dos movimentos = saldo final − saldo inicial'); eq(r.rec.diff, 0, 'reconciliação com diferença zero');
+  eq(r.chain.ok, CX.nov.n, 'cadeia de saldos: todos os movimentos batem certo'); eq(r.chain.broken + r.chain.fixed, 0, 'cadeia: nenhum quebrado / sinal corrigido'); eq(r.semSinal, 0, 'nenhum movimento sem sinal');
+  eq(r.g.iban, CX.iban, 'IBAN do cabeçalho'); eq(r.g.nome, CX.nome, 'nome da conta sugerido a partir do cabeçalho (produto)'); eq(r.g.explicito, true, 'saldos explícitos do extrato');
+  ok(r.descs.every((d) => !/Continua|Capital Social|PÁGINA|Saldo/i.test(d)), 'descrições sem ruído (cabeçalhos, rodapés, «Continua»)');
+  ok(r.descs.some((d) => d === 'TRF.IMED. P/ FULANO TESTE-E0002'), 'descrição em duas células reunida');
+  eq(r.descs.filter((d) => d === 'COMPRA *1111 SUPERMERCADO EXEMPLO').length, 4, 'linhas idênticas preservadas (inclui 2 iguais no mesmo dia)');
+  eq(r.debts.length, 2, 'dois créditos detetados como sugestões de dívida');
+  ok(r.debts.every((d) => d.checked === false), 'dívidas sugeridas desmarcadas por omissão');
+  eq(r.debts.map((d) => d.saldo).join(','), '280000,140000', 'saldo em dívida = «Saldo Final» de cada crédito');
+  eq(r.debts[0].total, 400000, 'valor total = Capital Concedido'); eq(r.debts[0].taxa, 9, 'taxa 9,000%'); eq(r.debts[0].prestacao, 12000, 'prestação = total da próxima prestação');
+  eq(r.resumo.depositos, CX.nov.final, 'Resumo das Contas lido (depósitos)'); eq(r.warnings.filter((w) => !/melhor esforço/.test(w)).length, 0, 'sem avisos (resumo coerente com as secções)');
+  const d = await consolidated('extrato-consolidado-dez.pdf');
+  eq(d.g.opening, CX.dez.abertura, 'dezembro: saldo inicial = saldo final de novembro'); eq(d.rec.diff, 0, 'dezembro: reconciliação a zero'); eq(d.n, CX.dez.n, `dezembro: ${CX.dez.n} movimentos`);
+}
+console.log('\n== Datas sem ano, cadeia de saldos e correção de sinais (linhas sintéticas) ==');
+{
+  const u = await page.evaluate(async () => {
+    const P = await import('./js/import/pdfstatement.js');
+    const ln = (parts, page = 1) => ({ cells: parts.map(([x, s]) => ({ s, x, x2: x + s.length * 4 })), text: parts.map((p) => p[1]).join('  '), page });
+    const hdr = ln([[10, 'EXTRATO Nº 1'], [100, 'CONTA Nº 0000.00000000099'], [200, 'PERÍODO DE 2026-12-15 A 2027-01-14'], [400, 'PÁGINA 001/001']]);
+    const mk = (rows, opening, final, desc = false) => [hdr, ln([[10, 'Detalhe de Movimentos da Conta à Ordem']]), ln([[40, 'Data'], [80, 'Descritivo'], [300, 'Valor'], [380, 'Saldo']]), ln([[80, 'Saldo Inicial'], [380, opening]]),
+      ...rows.map(([d, desc2, v, s]) => ln([[10, d], [50, d], [80, desc2], [300, v], [380, s]])), ln([[80, 'Saldo Contabilístico Final'], [380, final]])];
+    // 1) valores sem sinal na coluna «Valor»: o sinal vem da cadeia de saldos; datas cruzam o ano
+    const a = P.parseStatementLines(mk([['28-12', 'COMPRA A', '100,00', '900,00'], ['30-12', 'ENTRADA B', '50,00', '950,00'], ['03-01', 'COMPRA C', '20,00', '930,00']], '1.000,00', '930,00'));
+    // 2) ficheiro com o mais recente primeiro
+    const b = P.parseStatementLines(mk([['03-01', 'COMPRA C', '-20,00', '930,00'], ['30-12', 'ENTRADA B', '50,00', '950,00'], ['28-12', 'COMPRA A', '-100,00', '900,00']], '1.000,00', '930,00'));
+    // 3) movimento a falhar na cadeia (linha em falta)
+    const c = P.parseStatementLines(mk([['28-12', 'COMPRA A', '-100,00', '900,00'], ['30-12', 'ENTRADA B', '50,00', '800,00']], '1.000,00', '800,00'));
+    return { a: { v: a.rows.map((r) => r.valor), d: a.rows.map((r) => r.data), fix: a.rows.filter((r) => r.sinalCorrigido).length, w: a.warnings, acc: Object.values(a.accounts)[0] }, b: { v: b.rows.map((r) => r.valor), asc: Object.values(b.accounts)[0].chain.asc, diff: Object.values(b.accounts)[0].diffExtrato }, c: { w: c.warnings, q: c.rows.filter((r) => r.cadeia === 'quebrada').length, diff: Object.values(c.accounts)[0].diffExtrato } };
+  });
+  eq(u.a.v.join(','), '-10000,5000,-2000', 'sinal corrigido pela cadeia de saldos (valores sem sinal → saída/entrada/saída)');
+  eq(u.a.d.join(','), '2026-12-28,2026-12-30,2027-01-03', 'período a cruzar o ano: 28-12 → 2026, 03-01 → 2027');
+  eq(u.a.fix, 2, 'dois sinais corrigidos automaticamente'); ok(u.a.w.some((w) => /Corrigi o sinal/.test(w)), 'aviso sobre sinais corrigidos'); eq(u.a.acc.diffExtrato, 0, 'fecha com o saldo final (diferença 0)');
+  eq(u.b.v.join(','), '-2000,5000,-10000', 'ordem decrescente (mais recente primeiro) validada'); eq(u.b.asc, false, 'ordem decrescente detetada'); eq(u.b.diff, 0, 'ordem decrescente: fecha a zero');
+  eq(u.c.q, 1, 'linha em falta: 1 movimento fora da cadeia assinalado'); ok(u.c.w.some((w) => /não bate/.test(w)) && u.c.diff !== 0, 'avisos: cadeia quebrada e soma não fecha com o extrato');
+}
+
+console.log('\n== Dois extratos consecutivos do mesmo PDF consolidado (mesma conta, sem nova conta, saldo inicial intacto) ==');
+{
+  const stA = await state();
+  await openImport(); await upload(FX('extrato-consolidado-nov.pdf')); await waitStep('contas');
+  eq(await page.inputValue('[data-g="0"] input[name=g-nome]'), 'Conta Exemplo Plus', 'PDF consolidado: nome sugerido da conta'); ok((await T('[data-g="0"]')).includes('PT50 9999 0000 0000 0000 0005 1'), 'PDF consolidado: IBAN no cartão da conta');
+  eq(cents(await page.inputValue('[data-g="0"] input[name=g-saldo]')), CX.nov.abertura, 'saldo inicial da conta nova = «Saldo Inicial» (2,50 €)');
+  ok((await T('[data-g="0"] [data-recon]')).includes('bate certo'), 'reconciliação: bate certo');
+  await next(); await waitStep('rever');
+  ok(await page.locator('#imp-sections').isVisible() && (await T('#imp-sections')).includes('Extrato consolidado'), 'banner «Extrato consolidado»');
+  eq(await page.locator('.irow').count(), CX.nov.n, `${CX.nov.n} linhas para rever`);
+  ok(await page.locator('#imp-debts').isVisible() && await page.locator('[data-debt]').count() === 2 && await page.locator('[data-debt]:checked').count() === 0, 'créditos detetados (opcional), desmarcados');
+  ok((await T('#imp-recon')).includes('=') && !(await T('#imp-recon')).includes('⚠️'), 'revisão: saldo após importar = saldo do extrato');
+  await page.check('#imp-revisto');
+  await page.locator('[data-debt="0"]').check();
+  ok((await T('[data-commit]')).includes('1 dívida'), 'botão indica a dívida marcada');
+  await commitNow();
+  let st = await state();
+  const CA = st.accounts.find((a) => a.iban === CX.iban);
+  ok(CA, 'conta criada com o IBAN'); eq(CA.nome, CX.nome, 'nome da conta'); eq(CA.saldoInicial, CX.nov.abertura, 'saldo inicial = 2,50 €'); eq(bal(st, CA.id), CX.nov.final, 'saldo da conta = Saldo Contabilístico Final (reconcilia a zero)');
+  eq(st.movements.filter((m) => m.contaId === CA.id).length, CX.nov.n, 'só movimentos da conta à ordem (sem linhas de créditos)');
+  eq(st.movements.filter((m) => m.contaId === CA.id && m.tipo === 'entrada').length, CX.nov.entradas, 'entradas'); eq(st.movements.filter((m) => m.contaId === CA.id && m.tipo === 'saida').length, CX.nov.saidas, 'saídas');
+  const nDebts0 = st.debts.filter((d) => d.extRef).length;
+  eq(nDebts0, 1, 'dívida marcada criada (a outra não)'); const D1 = st.debts.find((d) => d.extRef === '0000.00000000071'.replace(/\D/g, ''));
+  ok(D1 && D1.saldoInicial === 280000 && D1.total === 400000 && D1.taxa === 9 && D1.prestacao === 12000 && /Crédito pessoal …0071/.test(D1.credor), 'dívida: saldo, total, taxa, prestação e nome');
+  ok((await T('#imp-done')).includes('Dívidas registadas'), 'concluído: dívida registada indicada');
+  // 2.º extrato (dezembro): reconhecer a conta por IBAN, sem conta nova, sem mexer no saldo inicial
+  const nAcc = st.accounts.length;
+  await openImport(); await upload(FX('extrato-consolidado-dez.pdf')); await waitStep('contas');
+  eq(await page.inputValue('[data-g="0"] select[name=g-choice]'), CA.id, 'dezembro: conta existente reconhecida pelo IBAN');
+  ok((await T('[data-g="0"]')).includes('saldo inicial da conta não é alterado'), 'dezembro: aviso de que o saldo inicial não é alterado');
+  ok((await T('[data-g="0"] [data-recon]')).includes('bate certo') && (await T('[data-g="0"] [data-recon]')).includes('coincide com o saldo da conta'), 'dezembro: saldo inicial do extrato coincide com o saldo da conta em 30/11 e reconcilia');
+  await next(); await waitStep('rever');
+  eq(await page.locator('.irow').count(), CX.dez.n, `dezembro: ${CX.dez.n} linhas`); eq(await page.locator('.irow.dup').count(), 0, 'dezembro: sem duplicados');
+  ok((await T('#imp-debts')).includes('Já registada') && await page.locator('[data-debt="0"]:disabled').count() === 1 && await page.locator('[data-debt="1"]:not(:disabled)').count() === 1, 'dezembro: crédito já registado não é sugerido outra vez; o outro continua opcional');
+  await page.check('#imp-revisto'); await commitNow();
+  st = await state();
+  eq(st.accounts.length, nAcc, 'dezembro: nenhuma conta nova'); const CA2 = st.accounts.find((a) => a.id === CA.id);
+  eq(CA2.saldoInicial, CX.nov.abertura, 'dezembro: saldo inicial da conta inalterado'); eq(bal(st, CA.id), CX.dez.final, 'dezembro: saldo da conta = saldo final de dezembro');
+  eq(st.movements.filter((m) => m.contaId === CA.id).length, CX.nov.n + CX.dez.n, 'dezembro: movimentos acrescentados');
+  eq(st.debts.filter((d) => d.extRef).length, nDebts0, 'dezembro: sem dívidas duplicadas');
+  // reimportar novembro: tudo duplicado
+  await openImport(); await upload(FX('extrato-consolidado-nov.pdf')); await waitStep('contas'); await next(); await waitStep('rever');
+  eq(await page.locator('.irow.dup').count(), CX.nov.n, 'reimportar novembro: todos marcados como já importados'); eq(await page.locator('.irow [data-chk]:checked').count(), 0, '…e desmarcados');
+  ok((await T('#imp-sum')).includes('0 movimentos'), 'reimportar novembro: nada a importar');
+  // anular dezembro e novembro: dívida e conta removidas
+  const impDez = st.imports.find((i) => i.ficheiro.includes('dez')), impNov = st.imports.find((i) => i.ficheiro.includes('nov'));
+  await openImport(); await page.locator(`[data-undo="${impDez.id}"]`).click(); await page.locator('.modal-back [data-yes]').click(); await page.waitForTimeout(300);
+  st = await state(); eq(bal(st, CA.id), CX.nov.final, 'anular dezembro: volta ao saldo de novembro');
+  await openImport(); await page.locator(`[data-undo="${impNov.id}"]`).click(); await page.waitForTimeout(100); ok((await T('.modal-back')).includes('1 dívida'), 'anular novembro: confirmação menciona a dívida'); await page.locator('.modal-back [data-yes]').click(); await page.waitForTimeout(300);
+  st = await state(); ok(!st.accounts.some((a) => a.iban === CX.iban) && st.debts.filter((d) => d.extRef).length === 0, 'anular novembro: conta e dívida criadas pela importação removidas');
+}
+
+console.log('\n== Saldo que não bate: causas, opções e ajuste do saldo inicial da conta existente ==');
+{
+  // dezembro primeiro (conta nova com saldo inicial = saldo de novembro), depois novembro (anterior): o saldo inicial do extrato não coincide
+  await toReview(FX('extrato-consolidado-dez.pdf')); await page.check('#imp-revisto'); await commitNow();
+  await openImport(); await upload(FX('extrato-consolidado-nov.pdf')); await waitStep('contas');
+  ok((await T('[data-g="0"] [data-recon]')).includes('não bate certo') && (await T('[data-g="0"] [data-recon]')).includes('Causas prováveis'), 'aviso de saldo que não bate com explicação das causas');
+  ok((await T('[data-g="0"] [data-recon]')).includes('extrato do período anterior'), 'causa provável: falta importar o extrato do período anterior');
+  ok(await page.locator('[data-g="0"] [data-adjust-acc]').count() === 1, 'opção: ajustar o saldo inicial da conta');
+  await page.locator('[data-g="0"] [data-adjust-acc]').click();
+  ok((await T('[data-g="0"] [data-recon]')).includes('bate certo'), 'depois do ajuste o saldo bate certo');
+  await next(); await waitStep('rever'); await page.check('#imp-revisto'); await commitNow();
+  let st = await state(); const CB = st.accounts.find((a) => a.iban === CX.iban);
+  eq(CB.saldoInicial, CX.nov.abertura, 'saldo inicial da conta ajustado para o saldo inicial de novembro'); eq(bal(st, CB.id), CX.dez.final, 'saldo final = saldo final de dezembro');
+  const impN = st.imports.find((i) => i.ficheiro.includes('nov'));
+  await openImport(); await page.locator(`[data-undo="${impN.id}"]`).click(); await page.locator('.modal-back [data-yes]').click(); await page.waitForTimeout(300);
+  st = await state(); eq(st.accounts.find((a) => a.iban === CX.iban).saldoInicial, CX.dez.abertura, 'anular a importação reverte o ajuste do saldo inicial');
+  // desmarcar um movimento → diferença explicada pelos desmarcados, com botão para os marcar
+  await toReview(FX('extrato-consolidado-nov.pdf')); await page.locator('.irow [data-chk]').nth(3).uncheck();
+  ok((await T('#imp-recon')).includes('⚠️'), 'revisão: aviso de diferença ao desmarcar um movimento');
+  await page.locator('[data-goto-contas]').click(); await waitStep('contas');
+  ok((await T('[data-g="0"] [data-recon]')).includes('desmarcado'), 'causa: movimento desmarcado');
+  await page.locator('[data-g="0"] [data-mark-unchecked]').click(); await waitStep('contas');
+  ok((await T('[data-g="0"] [data-recon]')).includes('bate certo') || (await T('[data-g="0"] [data-recon]')).includes('extrato do período anterior'), 'marcar os desmarcados repõe a leitura completa');
+}
 
 console.log('\n== Migração de esquema (v2 → v3) ==');
 {

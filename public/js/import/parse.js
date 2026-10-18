@@ -209,7 +209,7 @@ export function extractMeta(preRows, fileName = '', headerText = '') {
 }
 
 // ---------- cabeçalhos e deteção automática de colunas ----------
-const hclean = (s) => norm(s).replace(/[._:;()[\]/€*#"-]/g, ' ').replace(/\s+/g, ' ').trim();
+export const hclean = (s) => norm(s).replace(/[._:;()[\]/€*#"-]/g, ' ').replace(/\s+/g, ' ').trim();
 export function classifyHeader(h) {
   const n = hclean(cellStr(h));
   if (!n || n.length > 60) return null;
@@ -406,86 +406,35 @@ export function parseQIF(text) {
   return { rows, meta: { iban: null, acctNo: null, bank: null, title: '' }, warnings, ignored: [] };
 }
 
-// ---------- PDF (melhor esforço): linhas de texto -> movimentos ----------
-const D_TOK = '(?:\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}|\\d{4}-\\d{2}-\\d{2}|\\d{1,2} (?:de )?[A-Za-zçÇ]{3,9}\\.? (?:de )?\\d{2,4})';
-const LINE_DATE = new RegExp(`^\\s*(${D_TOK})(?:\\s+(${D_TOK}))?(?=\\s|$)\\s*(.*)$`, 'i');
-const AMT = /(?<![\d.,])[-+−]?\(?\d{1,3}(?:[. \u00a0]\d{3})*[,.]\d{2}\)?-?(?:\s?(?:€|EUR))?(?:\s?(?:CR|DB|C|D))?(?![\d,.])/g;
-const AMT_FULL = /^[-+−]?\(?\d{1,3}(?:[. \u00a0]\d{3})*[,.]\d{2}\)?-?(?:\s?(?:€|EUR))?(?:\s?(?:CR|DB|C|D))?$/;
-
-export function parseStatementLines(lines, fileName = '') {
-  const textAll = lines.map((l) => l.text).join('\n');
-  const meta = { iban: findIban(lines.slice(0, 40).map((l) => l.text).join('\n')), acctNo: null, bank: detectBank(textAll.slice(0, 3000) + ' ' + fileName), title: '' };
-  // âncoras de colunas (cabeçalho com Débito/Crédito/Saldo)
-  let anchors = null;
-  for (const l of lines) {
-    const cs = (l.cells || []).map((c) => ({ ...c, n: hclean(c.s) }));
-    const d = cs.find((c) => /^(debito|debit)\b/.test(c.n)), c = cs.find((x) => /^(credito|credit)\b/.test(x.n)), s = cs.find((x) => /^saldo\b|^balance\b/.test(x.n));
-    if (d && c) { anchors = { debito: (d.x + d.x2) / 2, credito: (c.x + c.x2) / 2, saldo: s ? (s.x + s.x2) / 2 : null }; break; }
-  }
-  const raw = []; const warnings = []; let last = null;
-  const allAmts = [];
-  for (const l of lines) {
-    const m = l.text.match(LINE_DATE);
-    if (!m) {
-      if (last && !last.cont && l.text.length <= 60 && !/saldo|p[aá]gina|total|extrato|iban|nib|data|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|débito|crédito/i.test(l.text) && !(l.text.match(AMT) || []).length) last.desc += ' ' + l.text.trim();
-      continue;
+// ---------- cadeia de saldos: valida (e corrige o sinal de) movimentos usando a coluna «Saldo» ----------
+// rows em ordem do ficheiro; opening = saldo antes do 1.º movimento cronológico (ex.: «Saldo Inicial»), se conhecido.
+// Regra: saldo(n) = saldo(n-1) + valor(n). Se |diferença| = |valor| mas o sinal é o contrário, o sinal é corrigido.
+export function validateChain(rows, opening = null) {
+  const n = rows.length;
+  const run = (asc, apply) => {
+    let ok = 0, fixed = 0, broken = 0, checked = 0;
+    let prev = opening;
+    for (let k = 0; k < n; k++) {
+      const r = rows[asc ? k : n - 1 - k];
+      if (r.saldo == null) { prev = prev == null ? null : prev + r.valor; continue; }
+      if (prev != null) {
+        const exp = r.saldo - prev; checked++;
+        if (exp === r.valor) { ok++; if (apply) { r.semSinal = false; r.cadeia = 'ok'; } }
+        else if (exp !== 0 && Math.abs(exp) === Math.abs(r.valor)) { fixed++; if (apply) { if (!r.semSinal) r.sinalCorrigido = true; r.valor = exp; r.semSinal = false; r.cadeia = 'ok'; } }
+        else { broken++; if (apply) r.cadeia = 'quebrada'; }
+      }
+      prev = r.saldo;
     }
-    const rest = m[3];
-    const ms = [...rest.matchAll(AMT)];
-    const tail = [];
-    for (let i = ms.length - 1; i >= 0; i--) {
-      const after = rest.slice(ms[i].index + ms[i][0].length, i === ms.length - 1 ? undefined : ms[i + 1].index);
-      if (i === ms.length - 1 ? /^\s*$/.test(after) : /^\s*$/.test(after)) tail.unshift(ms[i]); else break;
-    }
-    if (!tail.length) { last = null; continue; }
-    const desc = rest.slice(0, tail[0].index).replace(/\s+/g, ' ').trim();
-    const cells = l.cells || [];
-    const tcells = []; for (let i = cells.length - 1; i >= 0 && AMT_FULL.test(cells[i].s.trim()); i--) tcells.unshift(cells[i]);
-    const xs = tcells.length === tail.length ? tcells.map((c) => (c.x + c.x2) / 2) : null;
-    const items = tail.map((t, i) => ({ s: t[0], x: xs ? xs[i] : null }));
-    raw.push({ data: parseDate(m[1]), desc, items, cont: false, extra: { dataValor: m[2] || null } });
-    last = raw[raw.length - 1];
-    for (const it of items) allAmts.push(it.s);
-  }
-  const style = detectDecimalStyle(allAmts) || 'comma';
-  const rows = [];
-  let unsigned = 0;
-  for (const r of raw) {
-    if (!r.data) continue;
-    const nums = r.items.map((it) => ({ ...it, v: parseAmount(it.s, style) })).filter((it) => !Number.isNaN(it.v));
-    if (!nums.length) continue;
-    let valor = null, saldo = null, certo = false;
-    const explicitSign = (s) => /^[-+−(]/.test(s.trim()) || /[-)]\s*(?:€|EUR)?$/.test(s.trim()) || /(?:CR|DB|C|D)$/i.test(s.trim());
-    if (anchors && nums.every((n) => n.x != null)) {
-      const near = (x) => { const c = [['debito', anchors.debito], ['credito', anchors.credito], ...(anchors.saldo != null ? [['saldo', anchors.saldo]] : [])].sort((a, b) => Math.abs(a[1] - x) - Math.abs(b[1] - x)); return c[0][0]; };
-      let d = 0, c = 0, has = false;
-      for (const n of nums) { const k = near(n.x); if (k === 'saldo') saldo = n.v; else if (k === 'debito') { d += Math.abs(n.v); has = true; } else { c += Math.abs(n.v); has = true; } }
-      if (has) { valor = c - d; certo = true; }
-    }
-    if (valor == null) {
-      if (nums.length >= 2) { saldo = nums[nums.length - 1].v; const a = nums[nums.length - 2]; valor = a.v; certo = explicitSign(a.s); } else { valor = nums[0].v; certo = explicitSign(nums[0].s); }
-    }
-    rows.push({ data: r.data, desc: r.desc, valor, saldo, contaKey: '', contaLabel: '', semSinal: !certo });
-    if (!certo) unsigned++;
-  }
-  if (unsigned) inferSigns(rows);
-  const still = rows.filter((r) => r.semSinal).length;
-  if (still) { warnings.push(`Em ${still} linha(s) não foi possível determinar se é entrada ou saída (assumida saída) — confirme na revisão.`); }
-  for (const r of rows) { if (r.semSinal) r.valor = -Math.abs(r.valor); }
-  return { rows, meta, warnings, ignored: [], anchors: !!anchors };
-}
-
-// Usa a cadeia de saldos para decidir o sinal de movimentos sem sinal explícito
-export function inferSigns(rows) {
-  const idx = rows.map((r, i) => (r.saldo != null ? i : -1)).filter((i) => i >= 0);
-  if (idx.length < 2) return;
-  const score = (asc) => { let ok = 0; for (let k = 1; k < idx.length; k++) { const a = rows[idx[k - 1]], b = rows[idx[k]]; const delta = asc ? b.saldo - a.saldo : a.saldo - b.saldo; const r = asc ? b : a; if (Math.abs(delta) === Math.abs(r.valor)) ok++; } return ok; };
-  const asc = score(true) >= score(false);
-  for (let k = 1; k < idx.length; k++) {
-    const a = rows[idx[k - 1]], b = rows[idx[k]];
-    const delta = asc ? b.saldo - a.saldo : a.saldo - b.saldo, r = asc ? b : a;
-    if (r.semSinal && Math.abs(delta) === Math.abs(r.valor)) { r.valor = delta > 0 ? Math.abs(r.valor) : -Math.abs(r.valor); r.semSinal = false; }
-  }
+    return { ok, fixed, broken, checked };
+  };
+  if (!rows.some((r) => r.saldo != null)) return { asc: true, ok: 0, fixed: 0, broken: 0, checked: 0, inferidos: 0 };
+  const a = run(true, false), d = run(false, false);
+  const sa = a.ok + a.fixed, sd = d.ok + d.fixed;
+  let asc = sa >= sd;
+  if (sa === sd && n > 1) asc = rows[0].data <= rows[n - 1].data;
+  const before = rows.filter((r) => r.semSinal).length;
+  const res = run(asc, true);
+  return { asc, ...res, inferidos: before - rows.filter((r) => r.semSinal).length };
 }
 
 // ---------- saldos: abertura e final a partir da coluna de saldo ----------

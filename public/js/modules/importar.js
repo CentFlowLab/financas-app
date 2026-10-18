@@ -5,7 +5,7 @@ import { accountBalance } from '../model.js';
 import { ACCOUNT_TYPES, accountTypeInfo } from '../defaults.js';
 import { confirmBox, toast } from '../ui.js';
 import { ICONS } from '../icons.js';
-import { loadSource, prepare, buildSession, isTable, getParsed, refresh, summarize, reconcile, commit, persist, undoImport, setPair, suggest, tipoOf, FORMATOS, ACEITA } from '../import/engine.js';
+import { loadSource, prepare, buildSession, isTable, getParsed, refresh, summarize, reconcile, openingCheck, reconCauses, commit, persist, undoImport, setPair, suggest, tipoOf, FORMATOS, ACEITA } from '../import/engine.js';
 import { applyMapping, autoMap, cellStr } from '../import/parse.js';
 import { sampleCSV } from '../import/sample.js';
 
@@ -110,12 +110,37 @@ function stepColunas() {
 }
 
 // ---------- passo 3: contas ----------
+function causeHtml(c) {
+  switch (c.id) {
+    case 'desmarcadas': return `Há <b>${c.n}</b> movimento${c.n === 1 ? '' : 's'} desmarcado${c.n === 1 ? '' : 's'} (soma ${eur(c.soma)})${c.exato ? ' — corresponde à diferença' : ''}.`;
+    case 'cadeia': return `<b>${c.n}</b> movimento${c.n === 1 ? '' : 's'} não bate${c.n === 1 ? '' : 'm'} com a coluna de saldos do PDF: pode faltar uma linha ou um valor foi mal lido.`;
+    case 'leitura': return `A soma dos movimentos lidos no PDF não fecha com o «Saldo Inicial» e o «Saldo Final» do próprio extrato (${eur(c.diff)}): a leitura falhou nalguma linha.`;
+    case 'abertura': return `O saldo inicial do extrato não coincide com o saldo da conta em ${fmtDate(c.ate)} (diferença ${eur(c.diff)}): provavelmente falta importar o extrato do período anterior, ou há movimentos registados à mão${c.depois ? ' (a conta já tem movimentos posteriores a este extrato)' : ''}.`;
+    case 'manual': return 'Podem existir movimentos registados à mão, ou em falta, nesta conta.';
+    case 'duplicados': return `<b>${c.n}</b> movimento${c.n === 1 ? ' foi ignorado' : 's foram ignorados'} como duplicado${c.n === 1 ? '' : 's'} (soma ${eur(c.soma)}). Se não forem duplicados, marque-${c.n === 1 ? 'o' : 'os'}.`;
+    default: return 'Não consegui identificar a causa. Compare o saldo final com o extrato e reveja os movimentos.';
+  }
+}
 function reconText(g) {
   const r = reconcile(g);
-  if (!r) return '<small class="muted">Este ficheiro não traz saldos: o saldo inicial fica a 0,00 € (pode ajustá-lo).</small>';
-  const ok = Math.abs(r.diff) < 1;
-  const novo = g.choice === 'new';
-  return `<small class="recon ${ok ? 'ok' : 'bad'}" data-recon>${ok ? '✓' : '⚠️'} Saldo final do extrato: <b>${eur(r.final)}</b> · saldo da conta após importar: <b>${eur(r.calculado)}</b>${ok ? ' — bate certo.' : ` — diferença de ${eur(r.diff)}${novo ? '' : ' (pode haver movimentos em falta ou registados à mão)'}.`}${!ok && novo ? ' <button type="button" class="link btn-link" data-adjust="' + g.gi + '">Ajustar saldo inicial</button>' : ''}</small>`;
+  if (!r) return '<small class="muted" data-recon>Este ficheiro não traz saldos: o saldo inicial fica a 0,00 € (pode ajustá-lo).</small>';
+  const ok = r.diff === 0, novo = g.choice === 'new';
+  const oc = openingCheck(g);
+  const nums = `Saldo final do extrato: <b>${eur(r.final)}</b> · saldo da conta após importar: <b>${eur(r.calculado)}</b>`;
+  if (ok) return `<small class="recon ok" data-recon>✓ ${nums} — bate certo.${oc ? ` O saldo inicial do extrato (${eur(oc.esperado)}) coincide com o saldo da conta em ${fmtDate(oc.ate)}.` : ''}${g.ajusteInicial ? ` (saldo inicial da conta ajustado em ${sgn(g.ajusteInicial)})` : ''}</small>`;
+  const causes = reconCauses(g, r);
+  const btns = [];
+  if (novo) btns.push(`<button type="button" class="btn small" data-adjust="${g.gi}">Ajustar saldo inicial para ${eur(g.novo.saldoInicial + r.diff)}</button>`);
+  else if (oc && oc.diff !== 0 && !g.ajusteInicial) btns.push(`<button type="button" class="btn small" data-adjust-acc="${g.gi}">Ajustar o saldo inicial da conta (${sgn(oc.diff)})</button>`);
+  if (!novo && g.ajusteInicial) btns.push(`<button type="button" class="btn small ghost" data-adjust-undo="${g.gi}">Desfazer ajuste do saldo inicial</button>`);
+  if (r.desmarcadas.n) btns.push(`<button type="button" class="btn small ghost" data-mark-unchecked="${g.gi}">Marcar os ${r.desmarcadas.n} desmarcados</button>`);
+  return `<div class="recon bad recon-box" data-recon role="alert"><b>⚠️ O saldo não bate certo.</b> ${nums} — diferença de <b>${eur(r.diff)}</b>.
+    <p class="small">Causas prováveis:</p><ul>${causes.map((c) => `<li>${causeHtml(c)}</li>`).join('')}</ul>
+    <p class="small">O que pode fazer:</p><ul class="small">
+      <li>${novo ? '<b>Ajustar o saldo inicial</b> faz o saldo da conta ficar igual ao do banco, mas não encontra movimentos em falta.' : 'Se este extrato for anterior aos movimentos da conta, pode <b>ajustar o saldo inicial da conta</b>; se faltar o extrato anterior, importe-o primeiro.'}</li>
+      <li><b>Rever os movimentos</b> no passo seguinte (confirme valores, sinais e os desmarcados).</li>
+      <li><b>Continuar mesmo assim</b>: os movimentos são importados como estão e a diferença fica por explicar.</li></ul>
+    ${btns.length ? `<div class="btn-row">${btns.join('')}</div>` : ''}</div>`;
 }
 function groupCard(g) {
   const dates = g.rows.map((r) => r.data).sort();
@@ -129,7 +154,7 @@ function groupCard(g) {
       <div class="grid2"><label class="fld"><span>Nome da conta</span><input name="g-nome" value="${esc(g.novo.nome)}" maxlength="40"></label>
       <label class="fld"><span>Tipo</span><select name="g-tipo">${ACCOUNT_TYPES.map((t) => `<option value="${t.v}" ${g.novo.tipo === t.v ? 'selected' : ''}>${t.i} ${t.t}</option>`).join('')}</select></label></div>
       <label class="fld"><span>Saldo inicial (€)</span><input name="g-saldo" value="${esc(centsToInput(g.novo.saldoInicial))}" inputmode="decimal" autocomplete="off"><small>${g.bal ? 'Calculado a partir do saldo do extrato, para que o saldo da conta fique igual ao do banco.' : 'O extrato não indica saldos; pode ajustar se souber o saldo antes do primeiro movimento.'}</small></label>
-    </div>` : `<p class="small">Conta existente: <b>${esc(existing?.nome || '')}</b> · saldo atual ${eur(accountBalance(existing))}. Movimentos já existentes (mesmo dia, valor e descrição) serão marcados como duplicados.</p>`}
+    </div>` : `<p class="small">Conta existente: <b>${esc(existing?.nome || '')}</b> · saldo atual ${eur(accountBalance(existing))}. O saldo inicial da conta não é alterado; movimentos já existentes (mesmo dia, valor e descrição) são marcados como duplicados.</p>`}
     ${reconText(g)}
   </section>`;
 }
@@ -165,6 +190,25 @@ function summaryHtml() {
   const s = summarize(W.sess);
   return `<div class="imp-sum" id="imp-sum" role="status" aria-live="polite"><b data-s="n">${s.n} movimento${s.n === 1 ? '' : 's'}</b><span>Entradas <b class="pos" data-s="in">${eur(s.entradas)}</b></span><span>Saídas <b class="neg" data-s="out">${eur(s.saidas)}</b></span><span data-s="dups">${s.dups} duplicado${s.dups === 1 ? '' : 's'} ignorado${s.dups === 1 ? '' : 's'}</span><span data-s="novas">${s.novas} conta${s.novas === 1 ? '' : 's'} a criar</span>${s.nTransf ? `<span data-s="transf">${s.nTransf} transferência${s.nTransf === 1 ? '' : 's'}</span>` : ''}</div>`;
 }
+function reconBannerHtml() {
+  const lines = W.sess.groups.filter((g) => g.bal && g.rows.some((r) => r.checked || !r.dup)).map((g) => {
+    const r = reconcile(g); if (!r) return '';
+    const nome = g.choice === 'new' ? g.novo.nome : S.accounts.find((a) => a.id === g.choice)?.nome || g.label;
+    return r.diff === 0 ? `<p class="small recon ok">✓ ${esc(nome)}: saldo após importar ${eur(r.calculado)} = saldo final do extrato.</p>`
+      : `<p class="small recon bad">⚠️ ${esc(nome)}: saldo após importar ${eur(r.calculado)}, extrato ${eur(r.final)} (diferença ${eur(r.diff)}). <button type="button" class="link btn-link" data-goto-contas>Ver causas e opções</button></p>`;
+  }).join('');
+  return `<div id="imp-recon" aria-live="polite">${lines}</div>`;
+}
+function debtsHtml() {
+  const ds = W.sess.debts || [];
+  if (!ds.length) return '';
+  return `<section class="card" id="imp-debts"><div class="card-h"><h2>Créditos detetados</h2><span class="chip">opcional</span></div>
+    <p class="small muted">Estes créditos aparecem no extrato mas <b>não são movimentos da conta</b>. Se quiser acompanhá-los em «Dívidas», marque os que pretende registar (por omissão, nenhum está marcado). Os pagamentos já aparecem como saídas da conta.</p>
+    ${ds.map((d) => `<label class="check debt-sug"><input type="checkbox" data-debt="${d.id}" ${d.checked ? 'checked' : ''} ${d.existente ? 'disabled' : ''}> <span><b>${esc(d.credor)}</b><br><small>${d.existente ? 'Já registada em «Dívidas». ' : ''}Em dívida: <b>${eur(d.saldoAtual)}</b> · total ${eur(d.total)}${d.totalEstimado ? ' (estimado)' : ''}${d.taxa != null ? ` · taxa ${String(d.taxa).replace('.', ',')}%` : ''}${d.prestacao ? ` · prestação ${eur(d.prestacao)}` : ''}${d.amortizado ? ` · amortizado no período ${eur(d.amortizado)}` : ''}</small></span></label>`).join('')}
+  </section>`;
+}
+const debtsChecked = () => (W.sess.debts || []).filter((d) => d.checked && !d.existente).length;
+const canCommit = (sm) => (sm.n || debtsChecked()) && W.sess.revisto;
 function filteredRows() {
   const f = W.filtro;
   return W.sess.rows.filter((r) => (f === 'todos') || (f === 'dup' && r.dup) || (f === 'transf' && r.pairWith) || (f === 'desmarcados' && !r.checked));
@@ -185,14 +229,18 @@ function stepRever() {
   const s = W.sess;
   const banners = [];
   if (s.prev) banners.push(`<div class="hint warn" id="imp-already" role="alert">⚠️ Este ficheiro já foi importado em ${fmtDT(s.prev.data)} (${s.prev.nMov} movimentos). Os movimentos que já existem ficam marcados como duplicados e <b>não</b> serão importados outra vez.</div>`);
+  if (s.parsed?.consolidado && s.parsed.secoes?.length) {
+    const contas = s.parsed.secoes.filter((x) => x.tipo === 'conta'), cred = s.parsed.secoes.filter((x) => x.tipo === 'emprestimo');
+    banners.push(`<div class="hint" id="imp-sections">📑 <b>Extrato consolidado</b>${s.parsed.periodo ? ` (${fmtDate(s.parsed.periodo.ini)} a ${fmtDate(s.parsed.periodo.fim)})` : ''}: importei só os movimentos de ${contas.map((x) => `<b>${esc(x.titulo)}</b> (${x.n})`).join(', ')}.${cred.length ? ` Os ${cred.length} crédito${cred.length === 1 ? '' : 's'} (${esc(cred.map((x) => x.titulo).join(', '))}) não são movimentos: ficam como sugestão de dívida, mais abaixo.` : ''} Avisos, resumos e rodapés foram ignorados.</div>`);
+  }
   if (s.bestEffort) banners.push(`<div class="hint warn" id="imp-besteffort"><b>PDF — melhor esforço.</b> As datas, descrições, valores e o sinal (entrada/saída) foram deduzidos do texto do PDF e podem estar errados. Reveja todas as linhas.<label class="check"><input type="checkbox" id="imp-revisto" ${s.revisto ? 'checked' : ''}> Revi os movimentos extraídos do PDF</label></div>`);
   for (const w of s.warnings.filter((w) => !/melhor esforço/.test(w))) banners.push(`<div class="hint warn">${esc(w)}</div>`);
   if (s.ignored.length) banners.push(`<p class="small muted">${s.ignored.length} linha${s.ignored.length === 1 ? '' : 's'} do ficheiro ignorada${s.ignored.length === 1 ? '' : 's'} (títulos, totais ou sem data/valor).</p>`);
   const sm = summarize(s);
-  return `${banners.join('')}${summaryHtml()}
+  return `${banners.join('')}${summaryHtml()}${reconBannerHtml()}${debtsHtml()}
     <div class="imp-tools"><div id="imp-pills">${pillsHtml()}</div><div class="btn-row"><button type="button" class="btn small ghost" data-all="1">Marcar todos</button><button type="button" class="btn small ghost" data-all="0">Desmarcar todos</button></div></div>
     <div id="imp-list" class="imp-list">${listHtml()}</div>
-    <div class="imp-nav sticky"><button type="button" class="btn ghost" data-back>Voltar</button><span class="grow"></span><button type="button" class="btn primary" data-commit ${sm.n && s.revisto ? '' : 'disabled'}>Importar ${sm.n} movimento${sm.n === 1 ? '' : 's'}</button></div>`;
+    <div class="imp-nav sticky"><button type="button" class="btn ghost" data-back>Voltar</button><span class="grow"></span><button type="button" class="btn primary" data-commit ${canCommit(sm) ? '' : 'disabled'}>Importar ${sm.n} movimento${sm.n === 1 ? '' : 's'}</button></div>`;
 }
 
 // ---------- passo 5: feito ----------
@@ -201,7 +249,8 @@ function stepFeito() {
   const novas = rec.contas.filter((c) => c.nova).map((c) => c.nome);
   return `<section class="card imp-done" id="imp-done"><div class="big-ico">✅</div><h2>Importação concluída</h2>
     <p><b>${rec.nMov}</b> movimento${rec.nMov === 1 ? '' : 's'} importado${rec.nMov === 1 ? '' : 's'}${rec.transferencias ? ` (${rec.transferencias} transferência${rec.transferencias === 1 ? '' : 's'})` : ''} de <b>${esc(rec.ficheiro)}</b>.${rec.duplicados ? ` ${rec.duplicados} duplicado${rec.duplicados === 1 ? '' : 's'} ignorado${rec.duplicados === 1 ? '' : 's'}.` : ''}${novas.length ? ` Contas criadas: <b>${esc(novas.join(', '))}</b>.` : ''}${rec.aprendidas ? ` Aprendi ${rec.aprendidas} categoria${rec.aprendidas === 1 ? '' : 's'} das suas correções.` : ''}</p>
-    ${recon.map((r) => `<p class="small recon ${r.ok ? 'ok' : 'bad'}" data-done-recon>${r.ok === null ? '' : r.ok ? '✓' : '⚠️'} ${esc(r.nome)}: saldo ${eur(r.saldo)}${r.final != null ? ` · extrato ${eur(r.final)}${r.ok ? ' — bate certo' : ''}` : ''}</p>`).join('')}
+    ${(rec.dividaIds || []).length ? `<p class="small">Dívidas registadas: <b>${rec.dividaIds.length}</b> (veja em <a href="#/dividas">Dívidas</a>).</p>` : ''}${(rec.ajustes || []).length ? '<p class="small muted">O saldo inicial da conta foi ajustado a seu pedido (é revertido se anular a importação).</p>' : ''}
+    ${recon.map((r) => `<p class="small recon ${r.ok ? 'ok' : 'bad'}" data-done-recon>${r.ok === null ? '' : r.ok ? '✓' : '⚠️'} ${esc(r.nome)}: saldo ${eur(r.saldo)}${r.final != null ? ` · extrato ${eur(r.final)}${r.ok ? ' — bate certo' : ` — diferença de ${eur(r.final - r.saldo)}. Reveja em «Movimentos» ou anule a importação e confira os movimentos desmarcados, duplicados e o saldo inicial.`}` : ''}</p>`).join('')}
     <div class="btn-row imp-actions"><a class="btn primary" href="#/movimentos?mes=&conta=${rec.contas[0]?.id || ''}">Ver movimentos</a><a class="btn ghost" href="#/contas">Ver contas</a><button type="button" class="btn danger" data-undo="${rec.id}">Anular importação</button><button type="button" class="btn ghost" data-restart>Importar outro ficheiro</button></div>
     ${PRIVACY}</section>`;
 }
@@ -253,7 +302,8 @@ export default {
       body.querySelector('#imp-sum')?.replaceWith(Object.assign(document.createElement('div'), { innerHTML: summaryHtml() }).firstElementChild);
       const sm = summarize(W.sess);
       const b = body.querySelector('[data-commit]');
-      if (b) { b.textContent = `Importar ${sm.n} movimento${sm.n === 1 ? '' : 's'}`; b.disabled = !(sm.n && W.sess.revisto); }
+      if (b) { b.textContent = `Importar ${sm.n} movimento${sm.n === 1 ? '' : 's'}${debtsChecked() ? ` e ${debtsChecked()} dívida${debtsChecked() === 1 ? '' : 's'}` : ''}`; b.disabled = !canCommit(sm); }
+      const rb = body.querySelector('#imp-recon'); if (rb) rb.innerHTML = reconBannerHtml().replace(/^<div[^>]*>|<\/div>$/g, '');
       const pills = body.querySelector('#imp-pills'); if (pills) pills.innerHTML = pillsHtml();
     };
     const rowEl = (r) => body.querySelector(`.irow[data-r="${r.id}"]`);
@@ -288,7 +338,7 @@ export default {
       const card = t.closest('[data-g]');
       if (card) {
         const g = W.sess.groups[Number(card.dataset.g)];
-        if (t.name === 'g-choice') { g.choice = t.value; refresh(W.sess); card.replaceWith(Object.assign(document.createElement('div'), { innerHTML: groupCard(g) }).firstElementChild); }
+        if (t.name === 'g-choice') { g.choice = t.value; g.ajusteInicial = 0; refresh(W.sess); card.replaceWith(Object.assign(document.createElement('div'), { innerHTML: groupCard(g) }).firstElementChild); }
         else if (t.name === 'g-tipo') g.novo.tipo = t.value;
         return;
       }
@@ -303,6 +353,7 @@ export default {
         upd();
         return;
       }
+      if (t.matches('[data-debt]')) { const d = W.sess.debts.find((x) => x.id === Number(t.dataset.debt)); if (d) d.checked = t.checked; upd(); return; }
       if (t.id === 'imp-revisto') { W.sess.revisto = t.checked; upd(); }
     });
     body.addEventListener('input', (e) => { // nome/saldo da conta nova: guardar enquanto escreve (sem repintar)
@@ -328,15 +379,23 @@ export default {
       }
       const adj = c('[data-adjust]');
       if (adj) { const g = W.sess.groups[Number(adj.dataset.adjust)]; const soma = g.rows.filter((r) => r.checked).reduce((a, r) => a + r.valor, 0); g.novo.saldoInicial = g.bal.final - soma; return paint(); }
+      const adjAcc = c('[data-adjust-acc]');
+      if (adjAcc) { const g = W.sess.groups[Number(adjAcc.dataset.adjustAcc)]; const oc = openingCheck(g); if (oc) g.ajusteInicial = (g.ajusteInicial || 0) + oc.diff; return paint(); }
+      const adjUndo = c('[data-adjust-undo]');
+      if (adjUndo) { W.sess.groups[Number(adjUndo.dataset.adjustUndo)].ajusteInicial = 0; return paint(); }
+      const markU = c('[data-mark-unchecked]');
+      if (markU) { const g = W.sess.groups[Number(markU.dataset.markUnchecked)]; for (const r of g.rows) if (!r.checked && !r.dup) { r.checked = true; r.touched = true; } return paint(); }
+      if (c('[data-goto-contas]')) return go('contas');
       const forget = c('[data-forget]');
       if (forget) { S.catRules = S.catRules.filter((r) => r.id !== forget.dataset.forget); await save('catRules'); return paint(); }
       const undo = c('[data-undo]');
       if (undo) {
         const imp = S.imports.find((i) => i.id === undo.dataset.undo); if (!imp) return;
         const novas = (imp.contas || []).filter((x) => x.nova).map((x) => x.nome);
-        if (!await confirmBox(`Anular a importação de «${imp.ficheiro}»? Vão ser removidos os ${imp.nMov} movimentos importados${novas.length ? ` e as contas criadas (${novas.join(', ')})` : ''}.`, { okLabel: 'Anular importação', danger: true })) return;
-        const r = undoImport(imp.id); W = null; await persistAll();
-        toast(`Importação anulada: ${r.movs} movimento${r.movs === 1 ? '' : 's'} e ${r.contas} conta${r.contas === 1 ? '' : 's'} removidos${r.mantidas.length ? `. Conta mantida (tem outros movimentos): ${r.mantidas.join(', ')}` : ''}`, 'ok');
+        const nd = (imp.dividaIds || []).length;
+        if (!await confirmBox(`Anular a importação de «${imp.ficheiro}»? Vão ser removidos os ${imp.nMov} movimentos importados${novas.length ? ` e as contas criadas (${novas.join(', ')})` : ''}${nd ? `, as ${nd} dívida${nd === 1 ? '' : 's'} registada${nd === 1 ? '' : 's'}` : ''}${(imp.ajustes || []).length ? ' e o ajuste do saldo inicial' : ''}.`, { okLabel: 'Anular importação', danger: true })) return;
+        const r = undoImport(imp.id); W = null; await persistAll(); await save('debts');
+        toast(`Importação anulada: ${r.movs} movimento${r.movs === 1 ? '' : 's'} e ${r.contas} conta${r.contas === 1 ? '' : 's'} removidos${r.dividas ? ` · ${r.dividas} dívida${r.dividas === 1 ? '' : 's'} removida${r.dividas === 1 ? '' : 's'}` : ''}${r.mantidas.length ? `. Conta mantida (tem outros movimentos): ${r.mantidas.join(', ')}` : ''}`, 'ok');
         return paint();
       }
       if (W?.step !== 'rever') return;

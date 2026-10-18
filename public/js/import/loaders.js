@@ -54,7 +54,8 @@ export async function pdfLines(bytes) {
   for (let p = 1; p <= doc.numPages; p++) {
     const page = await doc.getPage(p);
     const tc = await page.getTextContent();
-    const items = tc.items.filter((i) => i.str && i.str.trim() !== '').map((i) => ({ s: i.str, x: i.transform[4], y: i.transform[5], w: i.width, h: Math.abs(i.height) || Math.abs(i.transform[3]) || 10 }));
+    // texto rodado (margens verticais, marcas de água) é ignorado: mistura-se com as linhas da tabela e engole datas
+    const items = tc.items.filter((i) => i.str && i.str.trim() !== '' && !(Math.abs(i.transform[1]) > Math.abs(i.transform[0]) * 0.5 || Math.abs(i.transform[2]) > Math.abs(i.transform[3]) * 0.5)).map((i) => ({ s: i.str, x: i.transform[4], y: i.transform[5], w: i.width, h: Math.abs(i.height) || Math.abs(i.transform[3]) || 10 }));
     items.sort((a, b) => b.y - a.y || a.x - b.x);
     const groups = [];
     for (const it of items) {

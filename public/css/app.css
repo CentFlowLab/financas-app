@@ -282,6 +282,8 @@ input[aria-invalid=true]{border-color:var(--neg)}
 .tbl.raw th{width:34px}
 .map-form .fld select{width:100%}
 .recon{display:block;margin-top:6px}.recon.ok{color:var(--pos)}.recon.bad{color:var(--warn-ink)}
+.recon-box{background:color-mix(in srgb,var(--warn) 18%,transparent);border-radius:10px;padding:10px 12px;margin-top:8px;font-size:.9rem}.recon-box ul{margin:4px 0 6px;padding-left:1.1rem}.recon-box li{margin:2px 0}.recon-box .btn-row{margin-top:6px;gap:6px;flex-wrap:wrap}
+#imp-recon .recon{margin:4px 0}.debt-sug{align-items:flex-start;margin:8px 0}.debt-sug small{color:var(--muted)}
 .imp-sum{position:sticky;top:0;z-index:6;display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 14px;margin:8px 0;font-size:.85rem;box-shadow:var(--shadow)}
 .imp-sum>b:first-child{font-size:1rem}
 .imp-tools{display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;align-items:center;margin-bottom:6px}.imp-tools .pills{margin-bottom:0}

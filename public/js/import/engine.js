@@ -2,7 +2,8 @@
 import { S, save } from '../db.js';
 import { uid, norm } from '../util.js';
 import { accountBalance } from '../model.js';
-import { decodeBytes, detectDelimiter, parseCSV, autoMap, tableToParsed, parseOFX, ofxCharset, parseQIF, parseStatementLines, balanceInfo, ibanPretty, guessAccountType } from './parse.js';
+import { decodeBytes, detectDelimiter, parseCSV, autoMap, tableToParsed, parseOFX, ofxCharset, parseQIF, balanceInfo, ibanPretty, guessAccountType } from './parse.js';
+import { parseStatementLines } from './pdfstatement.js';
 import { readWorkbook, sheetRows, pdfLines } from './loaders.js';
 import { categorize, learn } from './categorize.js';
 
@@ -71,7 +72,7 @@ export async function prepare(src, resetMap = true) {
     if (!lines.length) { src.error = 'sem-texto'; throw new Error('Este PDF não tem texto selecionável (parece uma imagem digitalizada). Exporte o extrato em CSV, Excel ou OFX a partir do homebanking.'); }
     src.parsed = parseStatementLines(lines, src.name);
     src.parsed.bestEffort = true;
-    if (!src.parsed.rows.length) throw new Error('Não consegui reconhecer movimentos neste PDF. Experimente exportar o extrato em CSV, Excel ou OFX.');
+    if (!src.parsed.rows.length) throw new Error(src.parsed.debts?.length ? 'Este PDF só tem secções de crédito/empréstimo e nenhuma tabela de movimentos de uma conta. Para registar o crédito, crie a dívida em «Dívidas».' : 'Não consegui reconhecer movimentos neste PDF. Experimente exportar o extrato em CSV, Excel ou OFX.');
     src.parsed.warnings.unshift('Leitura de PDF em modo «melhor esforço»: os extratos de cada banco são diferentes. Reveja cuidadosamente todos os movimentos antes de importar.');
   }
   if (src.table && resetMap) src.map = autoMap(src.table.rows);
@@ -101,12 +102,16 @@ function buildGroups(parsed, src) {
     const bank = meta.bank;
     const lbl = rows.find((r) => r.contaLabel)?.contaLabel || '';
     const last4 = (iban || acctNo || '').slice(-4);
-    const nome = key && !iban && lbl ? lbl : last4 ? `${bank?.nome || 'Conta'} …${last4}` : bank ? bank.nome : stem(src.name);
+    const nome = am.nome || (key && !iban && lbl ? lbl : last4 ? `${bank?.nome || 'Conta'} …${last4}` : bank ? bank.nome : stem(src.name));
     const matchKeys = [iban, acctNo ? 'conta:' + acctNo : null, key || null].filter(Boolean);
     if (!matchKeys.length) matchKeys.push('arq:' + norm(stem(src.name)));
     const tipo = am.tipo && am.tipo !== 'ordem' ? am.tipo : guessAccountType(`${nome} ${src.name} ${key ? '' : meta.title || ''}`);
-    const bal = balanceInfo(rows, am.ledger);
-    return { key, gi, label: iban ? ibanPretty(iban) : lbl || (acctNo ? 'Conta ' + acctNo : stem(src.name)), iban, acctNo, bank, matchKeys, rows, bal, choice: 'new', novo: { nome: uniqueAccountName(nome), tipo, saldoInicial: bal ? bal.opening : 0 } };
+    // PDF/extrato com «Saldo Inicial» e «Saldo Final» explícitos: usam-se tal e qual (a diferença, se existir, fica visível)
+    const per = am.periodo || parsed.periodo || null;
+    const bal = am.opening != null && am.final != null
+      ? { opening: am.opening, final: am.final, asc: true, fonte: 'extrato', explicito: true, inicio: per?.ini || null, fim: per?.fim || null }
+      : (() => { const b = balanceInfo(rows, am.ledger); return b ? { ...b, inicio: per?.ini || null, fim: am.ledger?.data || per?.fim || null } : b; })();
+    return { key, gi, diag: am.chain ? { quebradas: am.chain.broken, corrigidos: am.chain.fixed, diffExtrato: am.diffExtrato ?? 0 } : null, label: iban ? ibanPretty(iban) : lbl || (acctNo ? 'Conta ' + acctNo : stem(src.name)), iban, acctNo, bank, matchKeys, rows, bal, choice: 'new', novo: { nome: uniqueAccountName(nome), tipo, saldoInicial: bal ? bal.opening : 0 } };
   });
 }
 
@@ -136,7 +141,12 @@ export function buildSession(src) {
     const m = matchExisting(g, prev);
     if (m) g.choice = m;
   }
-  const sess = { src, parsed, groups, rows, prev, bestEffort: !!parsed.bestEffort, warnings: parsed.warnings || [], ignored: parsed.ignored || [], revisto: !parsed.bestEffort };
+  const debts = (parsed.debts || []).map((d, i) => {
+    const existente = S.debts.find((x) => x.extRef && x.extRef === d.ref) || null;
+    const credor = `${parsed.meta?.bank?.nome || 'Banco'} — ${d.produto} …${String(d.numero).replace(/\D/g, '').slice(-4)}`;
+    return { ...d, id: i, credor, existente: existente ? existente.id : null, checked: false };
+  });
+  const sess = { src, parsed, groups, rows, prev, debts, bestEffort: !!parsed.bestEffort, warnings: parsed.warnings || [], ignored: parsed.ignored || [], revisto: !parsed.bestEffort };
   for (const r of rows) suggest(r);
   refresh(sess);
   return sess;
@@ -220,21 +230,56 @@ export function summarize(sess) {
   const novas = sess.groups.filter((g) => g.choice === 'new' && g.rows.some((r) => r.checked));
   return { n, entradas, saidas, nTransf, dups, novas: novas.length, selecionadas: sess.rows.filter((r) => r.checked).length };
 }
+const addDay = (iso, n) => { const d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const accOf = (g) => (g.choice === 'new' ? null : S.accounts.find((a) => a.id === g.choice) || null);
+// Reconciliação do saldo final do extrato com o saldo da conta após importar.
+// Conta existente: usa o saldo da conta até ao fim do período do extrato (não conta movimentos posteriores).
 export function reconcile(g) {
   if (!g.bal) return null;
-  const soma = g.rows.filter((r) => r.checked).reduce((a, r) => a + r.valor, 0);
-  const base = g.choice === 'new' ? g.novo.saldoInicial : accountBalance(S.accounts.find((a) => a.id === g.choice) || { saldoInicial: 0, id: '' });
-  const calc = base + soma;
-  return { final: g.bal.final, calculado: calc, diff: g.bal.final - calc, soma };
+  const marcados = g.rows.filter((r) => r.checked);
+  const soma = marcados.reduce((a, r) => a + r.valor, 0);
+  const acc = accOf(g);
+  const base = !acc ? g.novo.saldoInicial : accountBalance(acc, g.bal.fim || undefined);
+  const ajuste = acc && g.ajusteInicial ? g.ajusteInicial : 0;
+  const calc = base + ajuste + soma;
+  const desm = g.rows.filter((r) => !r.checked && !r.dup);
+  const dups = g.rows.filter((r) => r.dup && !r.checked);
+  return { final: g.bal.final, calculado: calc, diff: g.bal.final - calc, soma, base, desmarcadas: { n: desm.length, soma: desm.reduce((a, r) => a + r.valor, 0) }, duplicados: { n: dups.length, soma: dups.reduce((a, r) => a + r.valor, 0) }, existente: !!acc };
+}
+// Conta existente: o saldo inicial do extrato (ex.: «Saldo Inicial») deve igualar o saldo da conta na véspera do 1.º dia do extrato
+export function openingCheck(g) {
+  const acc = accOf(g);
+  if (!acc || !g.bal?.explicito) return null;
+  const inicio = g.bal.inicio || g.rows.map((r) => r.data).sort()[0];
+  if (!inicio) return null;
+  const ate = addDay(inicio, -1);
+  const conta = accountBalance(acc, ate) + (g.ajusteInicial || 0);
+  return { esperado: g.bal.opening, conta, diff: g.bal.opening - conta, ate, temMovimentosDepois: S.movements.some((m) => (m.contaId === acc.id || m.contaDestinoId === acc.id) && m.data > (g.bal.fim || inicio)) };
+}
+// Causas prováveis de uma diferença na reconciliação (ordenadas por probabilidade)
+export function reconCauses(g, r = reconcile(g)) {
+  if (!r || r.diff === 0) return [];
+  const out = [];
+  const eq = (v) => Math.abs(v) === Math.abs(r.diff);
+  if (r.desmarcadas.n && (r.desmarcadas.soma === r.diff || eq(r.desmarcadas.soma))) out.push({ id: 'desmarcadas', n: r.desmarcadas.n, soma: r.desmarcadas.soma, exato: true });
+  else if (r.desmarcadas.n) out.push({ id: 'desmarcadas', n: r.desmarcadas.n, soma: r.desmarcadas.soma });
+  if (g.diag?.quebradas) out.push({ id: 'cadeia', n: g.diag.quebradas });
+  if (g.diag?.diffExtrato) out.push({ id: 'leitura', diff: g.diag.diffExtrato });
+  const oc = openingCheck(g);
+  if (oc && oc.diff !== 0) out.push({ id: 'abertura', diff: oc.diff, ate: oc.ate, depois: oc.temMovimentosDepois });
+  else if (r.existente && !out.length) out.push({ id: 'manual' });
+  if (r.duplicados.n) out.push({ id: 'duplicados', n: r.duplicados.n, soma: r.duplicados.soma });
+  if (!out.length) out.push({ id: 'desconhecida' });
+  return out;
 }
 
 // ---------- gravar / anular ----------
 // Aplica a importação ao estado (síncrono); o chamador atualiza o estado da interface e depois chama persist()
-export const persist = () => save('accounts', 'movements', 'imports', 'catRules');
+export const persist = () => save('accounts', 'movements', 'imports', 'catRules', 'debts');
 export function commit(sess) {
   const importId = uid();
   const now = Date.now();
-  const contas = [], contaIds = [], grupos = [];
+  const contas = [], contaIds = [], grupos = [], ajustes = [], dividaIds = [];
   const accOf = new Map();
   for (const g of sess.groups) {
     const used = g.rows.some((r) => r.checked);
@@ -246,6 +291,7 @@ export function commit(sess) {
       contaIds.push(id); contas.push({ id, nome: S.accounts[S.accounts.length - 1].nome, nova: true });
     } else {
       const a = S.accounts.find((x) => x.id === id);
+      if (used && g.ajusteInicial) { ajustes.push({ contaId: id, de: a.saldoInicial || 0, delta: g.ajusteInicial }); a.saldoInicial = (a.saldoInicial || 0) + g.ajusteInicial; }
       a.chaves = [...new Set([...(a.chaves || []), ...g.matchKeys])];
       if (g.iban && !a.iban) a.iban = g.iban;
       if (used) contas.push({ id, nome: a.nome, nova: false });
@@ -271,8 +317,14 @@ export function commit(sess) {
     if (tipo === 'entrada') entradas += r.valor; else saidas += -r.valor;
     if (r.catTouched && r.cat && learn(r.desc, tipo, r.cat)) aprendidas++;
   }
+  for (const d of sess.debts || []) {
+    if (!d.checked || d.existente) continue;
+    const id = uid();
+    S.debts.push({ id, credor: d.credor, total: d.total, saldoInicial: d.saldoAtual, taxa: d.taxa || 0, prestacao: d.prestacao || 0, criadoEm: new Date().toISOString(), extRef: d.ref, importId });
+    dividaIds.push(id);
+  }
   const dups = sess.rows.filter((r) => r.dup && !r.checked).length;
-  const rec = { id: importId, ficheiro: sess.src.name, formato: sess.src.format, hash: sess.src.hash, data: new Date().toISOString(), nMov: movIds.length, nLinhas: sess.rows.length, duplicados: dups, transferencias: nTransf, entradas, saidas, movIds, contaIds, contas, grupos, aprendidas };
+  const rec = { id: importId, ficheiro: sess.src.name, formato: sess.src.format, hash: sess.src.hash, data: new Date().toISOString(), nMov: movIds.length, nLinhas: sess.rows.length, duplicados: dups, transferencias: nTransf, entradas, saidas, movIds, contaIds, contas, grupos, aprendidas, ajustes, dividaIds, periodo: sess.parsed?.periodo || null };
   S.imports.push(rec);
   return rec;
 }
@@ -289,6 +341,12 @@ export function undoImport(id) {
     if (S.movements.some((m) => m.contaId === cid || m.contaDestinoId === cid)) mantidas.push(a.nome);
     else { S.accounts = S.accounts.filter((x) => x.id !== cid); contas++; }
   }
+  for (const aj of imp.ajustes || []) { const a = S.accounts.find((x) => x.id === aj.contaId); if (a) a.saldoInicial = (a.saldoInicial || 0) - aj.delta; }
+  let dividas = 0; const dividasMantidas = [];
+  for (const did of imp.dividaIds || []) {
+    const d = S.debts.find((x) => x.id === did); if (!d) continue;
+    if (S.debtPayments.some((p) => p.debtId === did)) dividasMantidas.push(d.credor); else { S.debts = S.debts.filter((x) => x.id !== did); dividas++; }
+  }
   S.imports = S.imports.filter((i) => i.id !== id);
-  return { movs, contas, mantidas };
+  return { movs, contas, mantidas, dividas, dividasMantidas };
 }
