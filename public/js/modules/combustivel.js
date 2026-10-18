@@ -25,7 +25,7 @@ function vehicleForm(id) {
   });
 }
 
-function fillForm(vehicleId, id) {
+export function fillForm(vehicleId, id) {
   const edit = id ? S.fuel.find((f) => f.id === id) : null;
   const vstats = fuelStats(vehicleId).rows;
   const lastKm = vstats.length ? vstats[vstats.length - 1].km : '';

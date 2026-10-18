@@ -6,10 +6,10 @@ export const inp = (name, val = '', attrs = '') => `<input name="${name}" value=
 export const sel = (name, opts, val, attrs = '') => `<select name="${name}" ${attrs}>${opts.map((o) => `<option value="${esc(o.v)}" ${String(o.v) === String(val) ? 'selected' : ''}>${esc(o.t)}</option>`).join('')}</select>`;
 export const money = (name, val = '', attrs = '') => `<input name="${name}" value="${esc(val)}" inputmode="decimal" placeholder="0,00" autocomplete="off" ${attrs}>`;
 
-export function openModal(title, bodyHtml, { onMount, wide, onClose } = {}) {
+export function openModal(title, bodyHtml, { onMount, wide, onClose, sheet } = {}) {
   const back = document.createElement('div');
   back.className = 'modal-back';
-  back.innerHTML = `<div class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><header><h2>${esc(title)}</h2><button type="button" class="icon-btn" data-close aria-label="Fechar">✕</button></header><div class="modal-body">${bodyHtml}</div></div>`;
+  back.innerHTML = `<div class="modal ${wide ? 'wide' : ''} ${sheet ? 'sheet' : ''}" role="dialog" aria-modal="true" aria-label="${esc(title)}">${sheet ? '<span class="grabber" aria-hidden="true"></span>' : ''}<header><h2>${esc(title)}</h2><button type="button" class="icon-btn" data-close aria-label="Fechar">✕</button></header><div class="modal-body">${bodyHtml}</div></div>`;
   document.body.appendChild(back);
   document.body.classList.add('noscroll');
   const close = () => {
@@ -30,10 +30,10 @@ export function openModal(title, bodyHtml, { onMount, wide, onClose } = {}) {
 }
 
 // Modal com formulário. onSubmit(fd, form, close) -> false/mensagem de erro para manter aberto
-export function formModal({ title, html, submit = 'Guardar', onSubmit, onMount, onDelete, deleteLabel = 'Apagar', wide }) {
+export function formModal({ title, html, submit = 'Guardar', onSubmit, onMount, onDelete, deleteLabel = 'Apagar', wide, sheet }) {
   const body = `<form class="form" novalidate>${html}<p class="form-error" role="alert" hidden></p><div class="actions">${onDelete ? `<button type="button" class="btn danger" data-delete>${deleteLabel}</button>` : ''}<span class="grow"></span><button type="button" class="btn ghost" data-close2>Cancelar</button><button class="btn primary" type="submit">${submit}</button></div></form>`;
   return openModal(title, body, {
-    wide,
+    wide, sheet,
     onMount: (el, close) => {
       const form = el.querySelector('form');
       const err = form.querySelector('.form-error');

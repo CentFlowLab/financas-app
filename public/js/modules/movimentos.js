@@ -2,7 +2,7 @@ import { S, save } from '../db.js';
 import { ui } from '../state.js';
 import { eur, esc, fmtDate, today, monthLabel, shiftMonth, curMonth, parseEuro, centsToInput, weekdayLabel, sum, norm } from '../util.js';
 import { sortMovs, catName, catIcon, accName, upsertMovement, removeMovement, activeAccounts } from '../model.js';
-import { fld, inp, sel, money, formModal, empty, toast } from '../ui.js';
+import { fld, inp, sel, money, formModal, empty, toast, openModal } from '../ui.js';
 import { ICONS } from '../icons.js';
 
 const LABEL = { saida: 'Saída', entrada: 'Entrada', transferencia: 'Transferência' };
@@ -81,6 +81,48 @@ function filtered() {
     (!q || norm(m.nota).includes(q) || norm(catName(m.categoriaId)).includes(q))));
 }
 
+const MOV_TIPOS = [{ v: '', t: 'Todos os tipos' }, { v: 'entrada', t: 'Entradas' }, { v: 'saida', t: 'Saídas' }, { v: 'transferencia', t: 'Transferências' }];
+// Nº de filtros ativos (o mês só conta se não for o mês atual)
+export const activeFilterCount = (f = ui.mov) => (f.mes !== curMonth() ? 1 : 0) + (f.cat ? 1 : 0) + (f.conta ? 1 : 0) + (f.tipo ? 1 : 0);
+function filterSummary(f = ui.mov) {
+  const parts = [f.mes ? monthLabel(f.mes) : 'Todos os meses'];
+  if (f.cat) parts.push(catName(f.cat));
+  if (f.conta) parts.push(accName(f.conta));
+  if (f.tipo) parts.push(MOV_TIPOS.find((t) => t.v === f.tipo)?.t || f.tipo);
+  return parts.join(' · ');
+}
+
+// Folha de filtros: mês, categoria, conta e tipo
+function openFilters(ctx) {
+  const f = ui.mov;
+  const cats = [{ v: '', t: 'Todas as categorias' }, ...S.categories.map((c) => ({ v: c.id, t: `${c.icone} ${c.nome}${c.tipo === 'entrada' ? ' (entrada)' : ''}` }))];
+  const accs = [{ v: '', t: 'Todas as contas' }, ...S.accounts.map((a) => ({ v: a.id, t: a.nome }))];
+  const html = `<div class="month-nav small"><button type="button" class="icon-btn" data-fm="-1" aria-label="Mês anterior" title="Mês anterior">${ICONS.left}</button><b id="fs-month"></b><button type="button" class="icon-btn" data-fm="1" aria-label="Mês seguinte" title="Mês seguinte">${ICONS.right}</button><button type="button" class="btn small ghost" data-fm="all"></button></div>
+    ${fld('Categoria', sel('cat', cats, f.cat))}${fld('Conta', sel('conta', accs, f.conta))}${fld('Tipo', sel('tipo', MOV_TIPOS, f.tipo))}
+    <div class="actions"><button type="button" class="btn ghost" data-reset>Limpar filtros</button><span class="grow"></span><button type="button" class="btn primary" data-done>Ver resultados</button></div>`;
+  openModal('Filtros', html, {
+    sheet: true,
+    onMount(el, close) {
+      const paint = () => {
+        const fm = ui.mov.mes;
+        el.querySelector('#fs-month').textContent = fm ? monthLabel(fm) : 'Todos os meses';
+        el.querySelectorAll('[data-fm="-1"],[data-fm="1"]').forEach((b) => { b.disabled = !fm; });
+        el.querySelector('[data-fm=all]').textContent = fm ? 'Ver tudo' : 'Mês atual';
+        for (const n of ['cat', 'conta', 'tipo']) el.querySelector(`[name=${n}]`).value = ui.mov[n];
+      };
+      paint();
+      el.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-fm]');
+        if (b) { const v = b.dataset.fm; ui.mov.mes = v === 'all' ? (ui.mov.mes ? '' : curMonth()) : shiftMonth(ui.mov.mes, Number(v)); paint(); ctx.rerender(); return; }
+        if (e.target.closest('[data-reset]')) { Object.assign(ui.mov, { mes: curMonth(), cat: '', conta: '', tipo: '' }); paint(); ctx.rerender(); return; }
+        if (e.target.closest('[data-done]')) close();
+      });
+      el.querySelectorAll('select').forEach((s) => s.addEventListener('change', () => { ui.mov[s.name] = s.value; ctx.rerender(); }));
+    },
+    onClose: () => document.querySelector('[data-filters]')?.focus(),
+  });
+}
+
 function listHtml() {
   const list = filtered();
   const f = ui.mov;
@@ -105,30 +147,20 @@ export default {
       history.replaceState(null, '', '#/movimentos');
     }
     const f = ui.mov;
-    const cats = [{ v: '', t: 'Todas as categorias' }, ...S.categories.map((c) => ({ v: c.id, t: `${c.icone} ${c.nome}${c.tipo === 'entrada' ? ' (entrada)' : ''}` }))];
-    const accs = [{ v: '', t: 'Todas as contas' }, ...S.accounts.map((a) => ({ v: a.id, t: a.nome }))];
+    const n = activeFilterCount();
     return `<div class="page-head"><h1 class="page-title">Movimentos</h1><button class="btn primary small" data-new>${ICONS.plus} Novo</button></div>
-    <div class="month-nav small"><button class="icon-btn" data-m="-1" aria-label="Mês anterior" ${f.mes ? '' : 'disabled'}>${ICONS.left}</button><b id="mov-month">${f.mes ? monthLabel(f.mes) : 'Todos os meses'}</b><button class="icon-btn" data-m="1" aria-label="Mês seguinte" ${f.mes ? '' : 'disabled'}>${ICONS.right}</button><button class="btn small ghost" data-m="all">${f.mes ? 'Ver tudo' : 'Mês atual'}</button></div>
-    <div class="filters">
-      ${sel('cat', cats, f.cat, 'aria-label="Categoria"')}${sel('conta', accs, f.conta, 'aria-label="Conta"')}
-      ${sel('tipo', [{ v: '', t: 'Todos os tipos' }, { v: 'entrada', t: 'Entradas' }, { v: 'saida', t: 'Saídas' }, { v: 'transferencia', t: 'Transferências' }], f.tipo, 'aria-label="Tipo"')}
-      <input type="search" name="q" value="${esc(f.q)}" placeholder="Pesquisar nota…" aria-label="Pesquisar">
-    </div>
+    <div class="searchbar"><input type="search" name="q" value="${esc(f.q)}" placeholder="Pesquisar nota…" aria-label="Pesquisar"><button type="button" class="btn filter-btn" data-filters aria-haspopup="dialog" aria-label="Filtros${n ? `, ${n} ativo${n === 1 ? '' : 's'}` : ''}">${ICONS.filtros}<span>Filtros</span>${n ? `<b class="fcount" id="fcount">${n}</b>` : ''}</button></div>
+    <p class="filter-sum small muted"><span id="mov-month">${esc(filterSummary())}</span>${n ? ' <button type="button" class="link btn-link" data-clear>Limpar filtros</button>' : ''}</p>
     <div id="mov-list">${listHtml()}</div>`;
   },
   mount(el, ctx) {
     const listEl = el.querySelector('#mov-list');
     el.addEventListener('click', (e) => {
+      if (e.target.closest('[data-filters]')) return openFilters(ctx);
+      if (e.target.closest('[data-clear]')) { Object.assign(ui.mov, { mes: curMonth(), cat: '', conta: '', tipo: '' }); return ctx.rerender(); }
       const mv = e.target.closest('[data-mov]'); if (mv) return openMovementForm({ id: mv.dataset.mov });
       if (e.target.closest('[data-new]')) return openMovementForm({ contaId: ui.mov.conta || undefined });
-      const b = e.target.closest('[data-m]');
-      if (b) {
-        const v = b.dataset.m;
-        ui.mov.mes = v === 'all' ? (ui.mov.mes ? '' : curMonth()) : shiftMonth(ui.mov.mes, Number(v));
-        ctx.rerender();
-      }
     });
-    el.querySelectorAll('select').forEach((s) => s.addEventListener('change', () => { ui.mov[s.name] = s.value; ctx.rerender(); }));
     el.querySelector('[name=q]').addEventListener('input', (e) => { ui.mov.q = e.target.value; listEl.innerHTML = listHtml(); });
   },
 };

@@ -77,7 +77,7 @@ async function reviewForm({ receipt, parsed, fotoBlob, texto }) {
   });
 }
 
-async function scanFile(file) {
+export async function scanFile(file) {
   const m = openModal('A ler o talão…', `<div class="scan"><img id="scan-img" class="thumb-lg" alt="Pré-visualização do talão"><div class="progress"><div id="scan-bar" style="width:3%"></div></div><p id="scan-msg" class="muted center">A preparar…</p></div>`, { onMount() {} });
   const bar = m.el.querySelector('#scan-bar'), msg = m.el.querySelector('#scan-msg');
   let cancelled = false;

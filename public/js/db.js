@@ -1,11 +1,11 @@
 // Armazenamento local (IndexedDB). Estado em memória (S) + persistência por coleção.
-// Modelo de dados (versão 1) — cada módulo futuro acrescenta a sua própria coleção:
+// Modelo de dados (versão 2) — cada módulo futuro acrescenta a sua própria coleção:
 //   accounts, categories, movements, debts, debtPayments,
 //   vehicles, fuel, warranties, receipts, prices
 // Valores monetários em cêntimos (inteiros); datas em 'AAAA-MM-DD'; fotos na store 'images' (Blob).
 import { DEFAULT_CATEGORIES, DEFAULT_ACCOUNTS, DEFAULT_SETTINGS } from './defaults.js';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2; // v2: categorias de saída podem ter 'orcamento' (cêntimos/mês)
 export const COLLS = ['accounts', 'categories', 'movements', 'debts', 'debtPayments', 'vehicles', 'fuel', 'warranties', 'receipts', 'prices'];
 export const S = { meta: { versao: SCHEMA_VERSION, criadoEm: new Date().toISOString() }, settings: DEFAULT_SETTINGS() };
 COLLS.forEach((c) => (S[c] = []));
@@ -50,12 +50,19 @@ export async function load() {
       if (v !== undefined) S[k] = v;
     }
     S.settings = { ...DEFAULT_SETTINGS(), ...S.settings, ia: { ...DEFAULT_SETTINGS().ia, ...(S.settings.ia || {}) } };
+    const antes = S.meta.versao || 1;
     migrate();
+    if (antes !== SCHEMA_VERSION) await save('categories', 'meta'); // guarda o esquema migrado
   }
   try { navigator.storage?.persist?.(); } catch { /* ignorar */ }
 }
 
-function migrate() { /* versões futuras do esquema: adicionar passos aqui */ S.meta.versao = SCHEMA_VERSION; }
+function migrate() {
+  // v1 -> v2: orçamento mensal por categoria (campo opcional 'orcamento', em cêntimos; null = sem orçamento)
+  if ((S.meta.versao || 1) < 2) S.categories.forEach((c) => { if (c.orcamento === undefined) c.orcamento = null; });
+  S.categories.forEach((c) => { if (!(c.orcamento > 0) || c.tipo !== 'saida') c.orcamento = null; });
+  S.meta.versao = SCHEMA_VERSION;
+}
 
 export function save(...keys) {
   const ps = keys.map((k) => tx('kv', 'readwrite', (s) => s.put(JSON.parse(JSON.stringify(S[k])), k)));

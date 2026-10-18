@@ -55,3 +55,18 @@ export function addMonthsISO(iso, n) {
 export const daysBetween = (a, b) => Math.round((new Date(b + 'T12:00:00') - new Date(a + 'T12:00:00')) / 86400000);
 export const sum = (arr, f = (x) => x) => arr.reduce((a, x) => a + f(x), 0);
 export const clamp = (n, a, b) => Math.min(b, Math.max(a, n));
+
+// Comparação com um período anterior. good = 'up' (mais é melhor) | 'down' (menos é melhor).
+// Devolve { dir: 'up'|'down'|'flat'|'new'|'none', pct, tone: 'pos'|'neg'|'flat', text, arrow }
+export function compare(cur, prev, { good = 'up', hasPrev = true } = {}) {
+  if (!hasPrev) return { dir: 'none', pct: null, tone: 'flat', text: '—', arrow: '' };
+  if (cur === prev) return { dir: 'flat', pct: 0, tone: 'flat', text: '0 %', arrow: '=' };
+  const up = cur > prev;
+  const tone = up === (good === 'up') ? 'pos' : 'neg';
+  if (!prev) return { dir: 'new', pct: null, tone, text: 'novo', arrow: up ? '↑' : '↓' };
+  const pc = ((cur - prev) / Math.abs(prev)) * 100;
+  if (Math.abs(pc) < 0.05) return { dir: 'flat', pct: 0, tone: 'flat', text: '0 %', arrow: '=' };
+  const a = Math.abs(pc) + 1e-9; // evita 56,4999… a arredondar para baixo
+  const t = a > 999 ? '>999 %' : a >= 10 ? Math.round(a) + ' %' : num(a, 1) + ' %';
+  return { dir: up ? 'up' : 'down', pct: pc, tone, text: t, arrow: up ? '↑' : '↓' };
+}

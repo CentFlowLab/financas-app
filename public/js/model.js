@@ -1,6 +1,6 @@
 // Lógica de negócio: saldos, resumos, dívidas, combustível, garantias, preços
 import { S, save } from './db.js';
-import { uid, sum, monthKey, addMonthsISO, daysBetween, today, shiftMonth, norm } from './util.js';
+import { uid, sum, compare, monthKey, addMonthsISO, daysBetween, today, shiftMonth, norm } from './util.js';
 import { CAT_DEBT } from './defaults.js';
 
 export const acc = (id) => S.accounts.find((a) => a.id === id);
@@ -26,14 +26,44 @@ export const totalBalance = () => sum(activeAccounts(), accountBalance);
 // ---------- movimentos ----------
 export const sortMovs = (arr) => [...arr].sort((a, b) => (b.data.localeCompare(a.data)) || (b.criadoEm || '').localeCompare(a.criadoEm || ''));
 export const movsOfMonth = (key) => S.movements.filter((m) => monthKey(m.data) === key);
-export function monthSummary(key) {
-  const ms = movsOfMonth(key);
+export function monthSummary(key, upToDay) { // upToDay: só conta movimentos até esse dia do mês (comparações)
+  const ms = movsOfMonth(key).filter((m) => !upToDay || Number(m.data.slice(8, 10)) <= upToDay);
   const entradas = sum(ms.filter((m) => m.tipo === 'entrada'), (m) => m.valor);
   const saidas = sum(ms.filter((m) => m.tipo === 'saida'), (m) => m.valor);
   const by = new Map();
   for (const m of ms) if (m.tipo === 'saida') by.set(m.categoriaId, (by.get(m.categoriaId) || 0) + m.valor);
   const porCategoria = [...by].map(([id, total]) => ({ id, total })).sort((a, b) => b.total - a.total);
   return { entradas, saidas, saldo: entradas - saidas, porCategoria };
+}
+
+// Comparação com o mês anterior. No mês em curso compara com o mesmo período do mês anterior (até ao mesmo dia).
+export function monthComparison(key) {
+  const prevKey = shiftMonth(key, -1);
+  const day = key === today().slice(0, 7) ? Number(today().slice(8, 10)) : 0;
+  const cur = monthSummary(key), prev = monthSummary(prevKey, day);
+  const hasPrev = movsOfMonth(prevKey).length > 0;
+  return { prevKey, day, hasPrev, prev, entradas: compare(cur.entradas, prev.entradas, { good: 'up', hasPrev }), saidas: compare(cur.saidas, prev.saidas, { good: 'down', hasPrev }), saldo: compare(cur.saldo, prev.saldo, { good: 'up', hasPrev }) };
+}
+
+// Orçamento mensal por categoria de saída (campo 'orcamento' da categoria, em cêntimos)
+export const budgetOf = (id) => cat(id)?.orcamento > 0 ? cat(id).orcamento : 0;
+export function budgetStatus(spent, budget) {
+  const ratio = budget > 0 ? spent / budget : 0;
+  const estado = ratio >= 1 ? 'over' : ratio >= 0.8 ? 'near' : 'ok';
+  return { ratio, pct: Math.round(ratio * 100), estado, restante: budget - spent };
+}
+export function budgetRows(key) { // categorias com orçamento + gasto no mês
+  const s = monthSummary(key);
+  return S.categories.filter((c) => c.tipo === 'saida' && c.orcamento > 0).map((c) => {
+    const spent = s.porCategoria.find((x) => x.id === c.id)?.total || 0;
+    return { cat: c, spent, budget: c.orcamento, ...budgetStatus(spent, c.orcamento) };
+  }).sort((a, b) => b.ratio - a.ratio);
+}
+// Última conta usada num movimento (por ordem de criação); por omissão a primeira conta ativa
+export function lastUsedAccountId() {
+  const act = activeAccounts();
+  const last = [...S.movements].filter((m) => act.some((a) => a.id === m.contaId)).sort((a, b) => (b.criadoEm || '').localeCompare(a.criadoEm || ''))[0];
+  return last?.contaId || act[0]?.id || '';
 }
 
 export function upsertMovement(data, id) {

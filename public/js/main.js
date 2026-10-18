@@ -2,6 +2,7 @@ import { load, onChange, S } from './db.js';
 import { ICONS } from './icons.js';
 import { esc } from './util.js';
 import { toast } from './ui.js';
+import { openQuickExpense } from './quick.js';
 import { expiringWarranties } from './model.js';
 import painel from './modules/painel.js';
 import movimentos, { openMovementForm } from './modules/movimentos.js';
@@ -61,9 +62,21 @@ async function render() {
   $('#view').replaceChildren(el);
   document.title = (mod.titulo === 'Painel' ? '' : mod.titulo + ' · ') + 'Finanças';
   renderNav(id);
-  $('#fab').hidden = id === 'assistente' || id === 'definicoes';
+  setFab(id);
   window.scrollTo(0, id === current ? y : 0);
   current = id; currentKey = key;
+}
+
+// No Painel o botão flutuante é a "Despesa rápida" (destacado); nas outras vistas abre o formulário completo.
+function setFab(id) {
+  const fab = $('#fab'), quick = id === 'painel';
+  fab.hidden = id === 'assistente' || id === 'definicoes';
+  if (fab.dataset.mode === (quick ? 'quick' : 'full')) return;
+  fab.dataset.mode = quick ? 'quick' : 'full';
+  fab.classList.toggle('extended', quick);
+  const label = quick ? 'Adicionar despesa rápida' : 'Novo movimento';
+  fab.setAttribute('aria-label', label); fab.title = label;
+  fab.innerHTML = ICONS.plus + (quick ? '<span>Despesa rápida</span>' : '');
 }
 
 export function applyTheme() {
@@ -82,8 +95,7 @@ onChange(() => { applyTheme(); if (!pending) { pending = true; queueMicrotask(()
 window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); window.__installEvt = e; if (current === 'definicoes') render(); });
 
 (async function init() {
-  $('#fab').innerHTML = ICONS.plus;
-  $('#fab').addEventListener('click', () => openMovementForm({}));
+  $('#fab').addEventListener('click', () => ($('#fab').dataset.mode === 'quick' ? openQuickExpense() : openMovementForm({})));
   try { await load(); } catch (e) { console.error(e); $('#view').innerHTML = `<div class="empty"><h3>Não foi possível abrir o armazenamento local</h3><p>${esc(e.message || e)}. Verifique se o navegador permite guardar dados neste site (modo privado bloqueia).</p></div>`; return; }
   applyTheme();
   await render();

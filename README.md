@@ -15,6 +15,11 @@ Aplicação web instalável (PWA), 100 % em português de Portugal, **sem servid
 - **Assistente** — pergunte em português sobre gastos, saldos, dívidas, consumo, garantias e preços. Funciona localmente; opcionalmente liga a uma API de IA compatível com OpenAI (Definições).
 - **Categorias** editáveis (Supermercado, Combustível, Casa, Saúde, Lazer, Transportes, Restaurantes, Salário…), tema claro/escuro, **exportar/importar cópia de segurança (JSON, inclui fotos)**.
 
+### Novidades (Painel, navegação e acessibilidade)
+- **Painel**: cartões Entradas/Saídas/Saldo com variação face ao mês anterior (↑/↓ e %; para as Saídas subir é "mau"; no mês em curso compara com o mesmo período do mês anterior); atalhos rápidos (Despesa rápida, Ler talão, Abastecimento, Garantias); botão flutuante **Despesa rápida** (folha inferior com valor + categoria; conta, nota e data opcionais; usa hoje e a última conta usada); **orçamento mensal por categoria** com barras (verde < 80 %, laranja ≥ 80 %, vermelho ≥ 100 %), editável no Painel ("Orçamentos") ou em Categorias.
+- **Movimentos**: só a pesquisa fica visível; mês, categoria, conta e tipo estão na folha **Filtros**, com contagem de filtros ativos.
+- **Acessibilidade**: texto secundário com contraste ≥ 4,5:1 nos dois temas (≥ 7:1 no escuro), áreas de toque ≥ 44 px e `aria-label`s; o teste e2e verifica contraste e tamanhos de toque.
+
 ## Como correr
 
 Requisitos: Node.js 18+.
@@ -60,9 +65,9 @@ scripts/serve.mjs       servidor estático mínimo
 tests/e2e.mjs           teste ponta-a-ponta (Playwright)
 ```
 
-### Modelo de dados (v1, esquema `financas-pessoais`)
+### Modelo de dados (v2, esquema `financas-pessoais`)
 Valores em **cêntimos**; datas `AAAA-MM-DD` (apresentadas `dd/mm/aaaa`); fotos em Blob na store `images`.
-Coleções: `accounts`, `categories`, `movements` (entrada | saida | transferencia), `debts`, `debtPayments`, `vehicles`, `fuel`, `warranties`, `receipts`, `prices`, mais `settings`. Registos ligados (pagamento de dívida, abastecimento, talão) guardam `movId` do movimento que geraram. Para acrescentar um módulo: criar `js/modules/xxx.js` (`{id, titulo, icone, render, mount}`), juntá-lo à lista em `main.js` e, se precisar de dados, acrescentar a coleção em `db.js` (`COLLS`) — a exportação/importação passa a incluí-la.
+Coleções: `accounts`, `categories`, `movements` (entrada | saida | transferencia), `debts`, `debtPayments`, `vehicles`, `fuel`, `warranties`, `receipts`, `prices`, mais `settings`. **v2** acrescenta `categories[].orcamento` (cêntimos/mês, só categorias de saída; `null` = sem orçamento); `migrate()` em `db.js` converte dados v1 ao abrir. Registos ligados (pagamento de dívida, abastecimento, talão) guardam `movId` do movimento que geraram. Para acrescentar um módulo: criar `js/modules/xxx.js` (`{id, titulo, icone, render, mount}`), juntá-lo à lista em `main.js` e, se precisar de dados, acrescentar a coleção em `db.js` (`COLLS`) — a exportação/importação passa a incluí-la.
 
 ## Privacidade
 Nada sai do dispositivo, exceto se ativar o assistente com IA online (envia a pergunta e um resumo do mês ao serviço escolhido; a chave de API fica só no dispositivo e não entra na cópia de segurança).
